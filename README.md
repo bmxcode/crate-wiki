@@ -60,6 +60,16 @@ uv tool install git+https://github.com/bmxcode/crate-wiki
 crate --version
 ```
 
+Then scaffold a vault:
+
+```bash
+crate init ~/crate-personal --scope personal
+```
+
+The vault root is an Obsidian vault, so open it and the graph works for free. `CLAUDE.md` at its root is the schema — the file that makes an assistant maintain the wiki rather than just answer about it. Read it first; it's meant to be edited as it earns changes.
+
+`--scope work` is the same thing for client work: no journal, and a vault that refuses to push anywhere ([ADR-0001](docs/adr/0001-local-only-work-vault.md)).
+
 ## Design
 
 - [Architecture](docs/architecture.md) — the layers, the tiers, and the data flow

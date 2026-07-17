@@ -34,3 +34,10 @@ jobs:
         run: |
           uv tool install .
           "$HOME/.local/bin/crate" --version
+
+          # --version can't see missing package data. The templates have to be in
+          # the wheel, and scaffolding a vault is the first thing that reads them —
+          # so this is the step that catches "works from a checkout, broken installed".
+          "$HOME/.local/bin/crate" init /tmp/ci-vault --scope personal
+          test -f /tmp/ci-vault/CLAUDE.md
+          test -f /tmp/ci-vault/.crate/templates/concept.md
