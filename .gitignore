@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# Vault content never belongs in the engine repo. Vaults live in their own
+# repositories; D11 is the single, curated exception and lands under docs/wiki/.
+raw/
+vaults/
+*.vault/
