@@ -9,5 +9,6 @@ One record per decision where a real alternative was rejected. If there was no a
 | [0003](0003-engine-vaults-over-fork.md) | A public engine plus separate content vaults, not a forked template | Three repos instead of one |
 | [0004](0004-deterministic-cli.md) | A deterministic CLI, rather than having the LLM do everything | The whole thing could have been prompts and no code |
 | [0005](0005-python-with-typescript-plugin.md) | Python for the engine; TypeScript confined to the Obsidian plugin | Polyglot needs a defence |
+| [0006](0006-private-sections-are-context-only.md) | Private raw sections are readable for context but never synthesized into the wiki | A gitignore looks like it already solved this |
 
 New ADRs get written when decisions arise — never to fill a quota.

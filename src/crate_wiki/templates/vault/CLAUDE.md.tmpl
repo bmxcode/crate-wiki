@@ -1,0 +1,102 @@
+# $vault_name — vault schema
+
+This is a crate-wiki vault. Scope: **$scope**.
+
+It exists because my recall of my own work is about three days long. Your job is to make what I
+learn and what I've done accumulate instead of scatter. You're not a chatbot here — you're the one
+who keeps this wiki true.
+
+Read this file before touching anything.
+
+## The layers, and the boundary that matters
+
+| Layer | Path | Author | You |
+|---|---|---|---|
+| 1 · Raw sources | `raw/` | the capture hook, me | **read, never write** |
+| 2 · The wiki | `wiki/`, `index.md`, `log.md` | **you** | read + write |
+| 3 · This schema | `CLAUDE.md`, `AGENTS.md` | me | read, never write |
+
+**`raw/` is immutable.** It's ground truth, and never writing it is what makes a bad synthesis
+recoverable — I can always re-read the source and have you redo the page. Editing raw to match the
+wiki destroys the only copy of what actually happened.
+
+**You don't edit this file.** If the schema is wrong, say so and I'll change it.
+
+## Page types
+
+Every page under `wiki/` is exactly one type. Something that fits none of them doesn't have a home
+yet — tell me rather than inventing a sixth type.
+
+| Type | Path | Holds | One per |
+|---|---|---|---|
+| `source` | `wiki/sources/` | what one raw source said, and why it mattered | raw file |
+| `entity` | `wiki/entities/` | a person, project, repo, system, company | thing |
+| `concept` | `wiki/concepts/` | an idea, pattern, technique | idea |
+| `synthesis` | `wiki/syntheses/` | an answer worth keeping | question |
+| `daily` | `wiki/daily/` | what happened on one day | day |
+
+Skeletons carrying the exact frontmatter for each live in `.crate/templates/`. Copy them; don't
+improvise the shape.
+
+## Every page
+
+**The filename is the title, and the H1 matches it.** `wiki/concepts/Session Parser.md` opens with
+`# Session Parser`. That's what makes `[[Session Parser]]` resolve with no aliases and no ceremony.
+
+**Prose, not bullets of bullets.** You're writing for someone who has forgotten everything — that's
+the whole premise. Bullets are for lists that are genuinely lists.
+
+## Wikilinks are the mechanism
+
+Link inline, in the sentence where the thing comes up — `the [[Session Parser]] drops tool output`,
+not a "Related" heading at the bottom.
+
+**Fan out generously.** A single ingested source usually touches 10–15 existing pages. That fan-out
+*is* the compounding: a page nothing links to is invisible, and a page that links nowhere is a dead
+end.
+
+**Never link a page you haven't created.** A dead wikilink is a lie about what the wiki knows. If
+something deserves a page and doesn't have one, create it or tell me.
+
+## index.md and log.md
+
+`index.md` catalogs every page exactly once, grouped by type, as `[[Page Name]] — one line`. A page
+that isn't indexed is lost, whatever else you did right.
+
+`log.md` is append-only. Never rewrite or reorder a line. One entry per operation, of the form
+`## [2026-07-17] ingest | Title`.
+
+## Judgment — the part that isn't a script
+
+**Extend before you create.** A new fact about an existing thing belongs on that thing's page. New
+pages are for new things, not new mentions.
+
+**Flag contradictions; never silently resolve them.** If a source disagrees with a page, show me
+both and ask. This wiki is worth having only while it's true, and quiet overwriting is exactly how
+it stops being.
+
+**Cite, don't invent.** Every claim traces back to something in `raw/`. If you're inferring, say
+you're inferring.
+
+**Say when you don't know.** A gap named in `index.md` is worth more than a page that reads well
+and is wrong.
+$private_sections
+## Don't do by hand what `crate` does exactly
+
+Mechanics have commands, and they cost nothing to run:
+
+| | |
+|---|---|
+| `crate capture` | pull sessions into `raw/` |
+| `crate lint` | dead wikilinks, orphans, missing index entries |
+
+Ask me to add a command before you hand-roll a mechanical job.
+
+## Operations
+
+- `/ingest` — fold new raw sources into the wiki. **Discuss the takeaways with me first.** That
+  step isn't optional; without it you're a summarizer.
+- `/ask` — answer from the wiki. Read `index.md` first, then only the pages it points at. An answer
+  worth keeping gets promoted to `wiki/syntheses/`, indexed, and logged.
+- `/lint` — contradictions, stale claims, concepts referenced with no page.
+$scope_section

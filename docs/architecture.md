@@ -88,9 +88,12 @@ wiki/                # Layer 2 — LLM-maintained
   syntheses/         #   query answers worth keeping
   daily/             #   YYYY-MM-DD.md
 .crate/
-  config.toml        #   scope: work | personal
+  config.toml        #   scope, raw sections, push policy — the vault's contract
   state.json         #   capture cursor — makes re-runs idempotent
+  templates/         #   one page skeleton per type, carrying the exact frontmatter
 ```
+
+`crate init <path> --scope work|personal` builds this. The scope is a *preset*: it seeds `config.toml`, and that file is the truth afterwards. Sections under `raw/` are data there rather than cases in code, each with a `private` flag that drives both the `.gitignore` and a rule in the schema — see [ADR-0006](adr/0006-private-sections-are-context-only.md), because the gitignore is only half of it.
 
 ## The session parser
 
