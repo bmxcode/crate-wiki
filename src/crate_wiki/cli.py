@@ -10,7 +10,7 @@ from typing import Annotated
 
 import typer
 
-from crate_wiki import __version__, vault
+from crate_wiki import __version__, session, vault
 
 app = typer.Typer(
     name="crate",
@@ -69,6 +69,29 @@ def init(
     typer.echo("  wiki/       Layer 2, LLM-maintained")
     typer.echo("")
     typer.echo(f"Next: open {path} in Obsidian, and read CLAUDE.md.")
+
+
+@app.command()
+def capture(
+    session_file: Annotated[Path, typer.Argument(help="A Claude Code session JSONL file.")],
+    vault_path: Annotated[Path, typer.Option("--vault", help="Vault to write the card into.")],
+) -> None:
+    """Turn a session JSONL into a session card in the vault. Free, deterministic, idempotent.
+
+    Re-running on the same session writes nothing new; a resumed session re-renders its card.
+    The Stop hook (ADR-0002) is what calls this on every session — but it stands alone too.
+    """
+    try:
+        result = session.capture(session_file, vault_path, crate_version=__version__)
+    except vault.VaultError as error:
+        typer.secho(f"crate: {error}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from error
+
+    rel = result.card_path.relative_to(vault_path.expanduser().resolve())
+    if result.written:
+        typer.echo(f"Captured {result.session_id[:8]} → {rel}")
+    else:
+        typer.echo(f"{result.session_id[:8]} already captured, nothing new")
 
 
 @app.command(hidden=True)
