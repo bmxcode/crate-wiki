@@ -70,6 +70,31 @@ The vault root is an Obsidian vault, so open it and the graph works for free. `C
 
 `--scope work` is the same thing for client work: no journal, and a vault that refuses to push anywhere ([ADR-0001](docs/adr/0001-local-only-work-vault.md)).
 
+## Capture automatically
+
+Wire capture to Claude Code's Stop hook, and every session lands in the vault on its own:
+
+```bash
+crate install-hook --vault ~/crate-personal
+```
+
+That merges a Stop hook into `~/.claude/settings.json`. It's idempotent and non-destructive — re-running updates its own entry and leaves any other Stop hooks alone; point it at a new vault to move the target. Prefer to wire it by hand? Add this instead (use the absolute path from `which crate` if your hook environment doesn't have it on `PATH`):
+
+```json
+{ "hooks": { "Stop": [ { "hooks": [
+  { "type": "command", "command": "crate capture claude --vault \"$HOME/crate-personal\"" }
+] } ] } }
+```
+
+What to expect:
+
+- **Zero tokens, and it never blocks session exit.** Capture is pure Python ([ADR-0002](docs/adr/0002-free-capture-paid-synthesis.md)). If anything goes wrong — a broken vault, a missing transcript — it fails quietly and the session still ends normally.
+- **One card per session.** The hook fires as the session runs and rewrites the same card in place, so a session is one file that stays current, not one per turn.
+- **Failures are logged, not shown.** Every outcome, good or bad, is one line in `~/.claude/crate-capture.log` — `tail` it if a card doesn't appear.
+- **One machine, one vault.** Personal and work stay isolated by living on separate machines; the work machine uses `--vault ~/crate-work`.
+
+Capture keeps *everything* — deciding which sessions are worth folding into the wiki is a judgment call that happens later, when you run `/ingest`.
+
 ## Design
 
 - [Architecture](docs/architecture.md) — the layers, the tiers, and the data flow
