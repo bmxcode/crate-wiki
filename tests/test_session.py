@@ -36,6 +36,12 @@ def rec(uuid, parent, role, content, **extra):
     return record
 
 
+def book(type_, uuid=None):
+    """A bookkeeping record — a title, queue op, etc. Carries a sessionId but no parentUuid,
+    the way Claude Code appends them around the real conversation."""
+    return {"uuid": uuid, "type": type_, "sessionId": "9f3a1c2e-0000-0000-0000-000000000000"}
+
+
 def use(name, **params):
     return {"type": "tool_use", "name": name, "input": params}
 
@@ -175,6 +181,41 @@ def test_a_dangling_parent_stops_the_walk_cleanly(tmp_path):
     card = parse(tmp_path, records)
     assert card is not None
     assert "after compaction" in card.render()
+
+
+def test_bookkeeping_records_after_the_last_turn_do_not_become_the_leaf(tmp_path):
+    # Real sessions end with title/queue records appended after the conversation. They carry
+    # a sessionId but no parentUuid, so the leaf must be the last real turn, not the last line.
+    records = [
+        *LINEAR,
+        book("ai-title"),
+        book("last-prompt"),
+        book("custom-title"),
+    ]
+    card = parse(tmp_path, records)
+
+    assert card.date == "2026-07-19", "must not fall back to 'undated'"
+    assert card.title == "d2-session-parser", "must not fall back to the short session id"
+    assert [t.role for t in card.turns] == ["user", "assistant"]
+    assert card.duration_min == 72
+    assert "All green." in card.render()
+
+
+def test_a_session_of_only_bookkeeping_parses_to_nothing(tmp_path):
+    assert parse(tmp_path, [book("ai-title"), book("queue-operation")]) is None
+
+
+def test_attachment_and_system_records_thread_through_the_walk(tmp_path):
+    # These carry uuid/parentUuid, so they're links in the chain — the walk passes through
+    # them to reach the turns, but they aren't turns themselves.
+    records = [
+        rec("u1", None, "user", "Start."),
+        {"uuid": "att", "parentUuid": "u1", "type": "attachment", "sessionId": "x"},
+        rec("a1", "att", "assistant", [{"type": "text", "text": "Reached the end."}]),
+    ]
+    card = parse(tmp_path, records)
+    assert [t.role for t in card.turns] == ["user", "assistant"]
+    assert "Reached the end." in card.render()
 
 
 def test_a_cycle_does_not_hang(tmp_path):

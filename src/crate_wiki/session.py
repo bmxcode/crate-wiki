@@ -25,6 +25,10 @@ SOURCE = "claude-code"
 # Where a card lands inside a vault, relative to its root.
 CARD_DIR = ("raw", "sessions", "claude-code")
 
+# The record types that are actual conversation. Everything else a session file carries —
+# titles, queue operations, attachments, system notes — is bookkeeping the card discards.
+CONVERSATION = ("user", "assistant")
+
 # Tools whose calls are "files touched", mapped to the input key holding the path.
 FILE_TOOLS = {
     "Edit": "file_path",
@@ -154,19 +158,22 @@ def _live_path(records: list[dict]) -> list[dict]:
     """The surviving conversation: walk from the active leaf back to its root.
 
     Rewinds branch the tree, so the live conversation is the path the session actually ended
-    on. Claude appends the active branch last, so the final main-chain record is the leaf; we
-    follow `parentUuid` up from it. A parent that isn't in the file (a compaction boundary)
-    ends the walk cleanly. Sidechains are excluded here — they collapse to one line each.
+    on. The leaf is the *last conversational turn*, not the last physical line: Claude appends
+    bookkeeping records (titles, queue ops) after the exchange, and they carry no `parentUuid`,
+    so walking from one yields a one-record "session" of pure metadata. From the real leaf we
+    follow `parentUuid` up; a parent that isn't in the file (a compaction boundary) ends the
+    walk cleanly. Sidechains are excluded here — they collapse to one line each.
     """
     main = [r for r in records if not r.get("isSidechain")]
-    if not main:
-        return []
-
     by_uuid = {r["uuid"]: r for r in main if "uuid" in r}
+
+    leaf = next((r for r in reversed(main) if r.get("type") in CONVERSATION), None)
+    if leaf is None:
+        return []
 
     path: list[dict] = []
     seen: set[str] = set()
-    current: dict | None = main[-1]
+    current: dict | None = leaf
     while current is not None:
         uuid = current.get("uuid")
         if uuid in seen:  # a cycle can only come from corrupt data; stop rather than loop
