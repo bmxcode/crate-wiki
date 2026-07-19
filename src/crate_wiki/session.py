@@ -58,12 +58,24 @@ class Action:
 
 @dataclass
 class Turn:
-    """A user prompt or an assistant step on the live path."""
+    """A user prompt, or an assistant step, on the live path.
+
+    `items` is an ordered stream: a user turn holds a single prose string; an assistant turn
+    holds prose strings and Actions interleaved in the order they occurred — so the card shows
+    which command followed which reasoning, rather than a wall of prose then a wall of actions.
+    """
 
     role: str  # "user" | "assistant"
     time: str  # "14:03", or "" when the timestamp is unreadable
-    text: str
-    actions: list[Action] = field(default_factory=list)
+    items: list = field(default_factory=list)
+
+    @property
+    def actions(self) -> list[Action]:
+        return [item for item in self.items if isinstance(item, Action)]
+
+    @property
+    def prose(self) -> str:
+        return "\n\n".join(item for item in self.items if isinstance(item, str))
 
 
 @dataclass
@@ -86,7 +98,7 @@ class Card:
     @property
     def files(self) -> list[str]:
         seen = {a.value for t in self.turns for a in t.actions if a.kind == "edit"}
-        return sorted(seen)
+        return sorted(_relative(path, self.cwd) for path in seen)
 
     @property
     def command_count(self) -> int:
@@ -206,12 +218,27 @@ def _blocks(record: dict) -> list:
     return []
 
 
+# Wrappers the harness injects into user-role records — task notifications, system reminders,
+# slash-command scaffolding, captured command output. None of it was typed by a human, so it
+# must never render as a prompt. These records carry no distinguishing field (isMeta is unset,
+# userType is "external" just like a real prompt), so the wrapper text itself is the signal.
+_INJECTED_PREFIXES = (
+    "<task-notification",
+    "<system-reminder",
+    "<command-name",
+    "<command-message",
+    "<local-command-stdout",
+    "<local-command-stderr",
+    "[SYSTEM NOTIFICATION",
+)
+
+
 def _user_text(record: dict) -> str | None:
     """A genuine user prompt, verbatim — or None if this "user" record isn't one.
 
     A record with `role: user` is often a tool_result being handed back, not something a human
-    typed; those carry no text block, so they fall out here. Meta records (command wrappers,
-    system notes) are dropped outright.
+    typed; those carry no text block, so they fall out here. Meta records and harness-injected
+    wrappers (a task notification, a system reminder) are dropped so they never pose as intent.
     """
     if record.get("isMeta"):
         return None
@@ -221,13 +248,18 @@ def _user_text(record: dict) -> str | None:
         if isinstance(block, dict) and block.get("type") == "text"
     ]
     text = "\n".join(part for part in parts if part).strip()
-    return text or None
+    if not text or text.lstrip().startswith(_INJECTED_PREFIXES):
+        return None
+    return text
 
 
-def _assistant(record: dict) -> tuple[str, list[Action]]:
-    """The assistant's prose and its surviving actions. `thinking` blocks are dropped."""
-    prose: list[str] = []
-    actions: list[Action] = []
+def _assistant(record: dict) -> list:
+    """The assistant's prose and actions, in the order they occurred. `thinking` is dropped.
+
+    Returns a mixed list of prose strings and Actions; keeping document order is what lets the
+    card show that a commit came after the tests, not just that both happened.
+    """
+    items: list = []
     for block in _blocks(record):
         if not isinstance(block, dict):
             continue
@@ -235,13 +267,13 @@ def _assistant(record: dict) -> tuple[str, list[Action]]:
         if kind == "text":
             text = block.get("text", "").strip()
             if text:
-                prose.append(text)
+                items.append(text)
         elif kind == "tool_use":
             action = _action(block)
             if action is not None:
-                actions.append(action)
+                items.append(action)
         # "thinking" and anything else: dropped.
-    return "\n\n".join(prose), actions
+    return items
 
 
 def _action(block: dict) -> Action | None:
@@ -277,17 +309,15 @@ def _turns(live: list[dict]) -> list[Turn]:
         if rtype == "user":
             text = _user_text(record)
             if text:
-                turns.append(Turn("user", time, text))
+                turns.append(Turn("user", time, [text]))
         elif rtype == "assistant":
-            prose, actions = _assistant(record)
-            if not prose and not actions:
+            items = _assistant(record)
+            if not items:
                 continue
             if turns and turns[-1].role == "assistant":
-                prev = turns[-1]
-                prev.text = "\n\n".join(part for part in (prev.text, prose) if part)
-                prev.actions.extend(actions)
+                turns[-1].items.extend(items)
             else:
-                turns.append(Turn("assistant", time, prose, actions))
+                turns.append(Turn("assistant", time, items))
     return turns
 
 
@@ -345,23 +375,38 @@ def _render_card(card: Card) -> str:
         lines.append("")
         stamp = f" · {turn.time}" if turn.time else ""
         if turn.role == "user":
+            prompt = turn.items[0] if turn.items else ""
             lines.append(f"**user**{stamp}")
-            lines += [f"> {line}" for line in turn.text.splitlines()] or ["> "]
+            lines += [f"> {line}" for line in prompt.splitlines()] or ["> "]
         else:
-            head = f"**assistant** — {turn.text}" if turn.text else "**assistant**"
-            lines.append(head)
-            for action in turn.actions:
-                lines.append(_render_action(action))
+            lines += _render_assistant(turn, card.cwd)
 
     return "\n".join(lines) + "\n"
 
 
-def _render_action(action: Action) -> str:
+def _render_assistant(turn: Turn, cwd: str) -> list[str]:
+    """An assistant turn, its prose and actions interleaved in the order they happened."""
+    items = turn.items
+    start = 0
+    if items and isinstance(items[0], str):
+        lines = [f"**assistant** — {items[0]}"]  # lead with the first prose, inline
+        start = 1
+    else:
+        lines = ["**assistant**"]
+    for item in items[start:]:
+        if isinstance(item, Action):
+            lines.append(_render_action(item, cwd))
+        else:
+            lines += ["", item]  # a later prose paragraph, set off by a blank line
+    return lines
+
+
+def _render_action(action: Action, cwd: str) -> str:
     if action.kind == "command":
         return f"- run `{action.value}`"
     if action.kind == "subagent":
         return f"- subagent ({action.value})"
-    return f"- edit {action.value}"
+    return f"- edit {_relative(action.value, cwd)}"
 
 
 # --------------------------------------------------------------------------------------
@@ -436,6 +481,20 @@ def _last(records: list[dict], key: str) -> str:
 
 def _short(session_id: str) -> str:
     return session_id[:8] if session_id else "unknown"
+
+
+def _relative(path: str, cwd: str) -> str:
+    """A file path relative to the session's cwd when it sits inside it; absolute otherwise.
+
+    Paths outside the working tree — a plan file under ~/.claude, say — stay absolute: they are
+    genuinely elsewhere, and a trail of `../../..` would be less honest than the full path.
+    """
+    if not cwd:
+        return path
+    try:
+        return str(Path(path).relative_to(cwd))
+    except ValueError:
+        return path
 
 
 def _oneline(text: str) -> str:

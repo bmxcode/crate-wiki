@@ -91,7 +91,7 @@ def test_a_linear_session_keeps_intent_prose_files_and_commands(tmp_path):
     card = parse(tmp_path, LINEAR)
 
     assert card is not None
-    assert "Implement D2. Plan mode first." in card.turns[0].text
+    assert "Implement D2. Plan mode first." in card.turns[0].prose
     assert card.turns[0].role == "user"
     assert card.files == ["src/crate_wiki/session.py"]
     assert card.command_count == 1
@@ -148,8 +148,47 @@ def test_consecutive_assistant_steps_fold_into_one_turn(tmp_path):
     card = parse(tmp_path, LINEAR)
     roles = [t.role for t in card.turns]
     assert roles == ["user", "assistant"]
-    assert card.turns[1].text.startswith("On it.")
-    assert "All green." in card.turns[1].text
+    assert card.turns[1].prose.startswith("On it.")
+    assert "All green." in card.turns[1].prose
+
+
+def test_prose_and_actions_render_in_document_order(tmp_path):
+    # A turn that reasons, acts, reasons, acts — the card must preserve that sequence, not
+    # group all prose then all actions (which loses "the commit came after the tests").
+    records = [
+        rec("u1", None, "user", "Ship it."),
+        rec(
+            "a1",
+            "u1",
+            "assistant",
+            [
+                {"type": "text", "text": "First I run the tests."},
+                use("Bash", command="pytest"),
+                {"type": "text", "text": "Green, so I commit."},
+                use("Bash", command="git commit"),
+            ],
+        ),
+    ]
+    body = parse(tmp_path, records).render()
+    order = [body.index(s) for s in ("First I run", "pytest", "Green, so I commit", "git commit")]
+    assert order == sorted(order), "prose and actions must stay interleaved in order"
+
+
+def test_harness_injected_user_records_never_pose_as_prompts(tmp_path):
+    # A task notification carries no distinguishing field — same shape as a real prompt — so
+    # the wrapper text is the only signal that it wasn't typed by a human.
+    injected = "<task-notification>\n<status>completed</status>\n</task-notification>"
+    records = [
+        rec("u1", None, "user", "Real intent here."),
+        rec("a1", "u1", "assistant", [{"type": "text", "text": "Working."}]),
+        rec("inj", "a1", "user", injected),
+        rec("a2", "inj", "assistant", [{"type": "text", "text": "Still working."}]),
+    ]
+    card = parse(tmp_path, records)
+
+    assert [t.role for t in card.turns] == ["user", "assistant"]
+    assert "Real intent here." in card.turns[0].prose
+    assert "task-notification" not in card.render()
 
 
 # --------------------------------------------------------------------------------------
@@ -281,6 +320,30 @@ def test_the_title_and_filename_lead_with_branch_and_date(tmp_path):
     assert card.title == "d2-session-parser"
     assert card.date == "2026-07-19"
     assert card.filename() == "2026-07-19-9f3a1c2e.md"
+
+
+def test_paths_inside_the_cwd_are_relativized_and_others_stay_absolute(tmp_path):
+    # cwd is /home/me/repo/crate-wiki (from the rec() default). A file in the tree reads
+    # relative; a plan file elsewhere keeps its absolute path rather than a ../../.. trail.
+    outside = "/home/me/.claude/plans/plan.md"
+    records = [
+        rec("u1", None, "user", "Edit two files."),
+        rec(
+            "a1",
+            "u1",
+            "assistant",
+            [
+                use("Write", file_path="/home/me/repo/crate-wiki/src/crate_wiki/session.py"),
+                use("Edit", file_path=outside),
+            ],
+        ),
+    ]
+    card = parse(tmp_path, records)
+
+    assert card.files == [outside, "src/crate_wiki/session.py"]
+    rendered = card.render()
+    assert "- edit src/crate_wiki/session.py" in rendered
+    assert f"- edit {outside}" in rendered
 
 
 def test_malformed_lines_are_skipped_not_fatal(tmp_path):
