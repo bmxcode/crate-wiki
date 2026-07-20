@@ -50,6 +50,10 @@ the page; a page without one shows up in the index as missing.
 **Prose, not bullets of bullets.** You're writing for someone who has forgotten everything — that's
 the whole premise. Bullets are for lists that are genuinely lists.
 
+**One line per paragraph.** Don't hard-wrap prose at a column — Obsidian renders a single newline
+inside a paragraph as a line break, so wrapped text reads as shredded in Reading View. `crate fmt`
+fixes this, so it's not something to get right by hand.
+
 ## Wikilinks are the mechanism
 
 Link inline, in the sentence where the thing comes up — `the [[Session Parser]] drops tool output`,
@@ -99,6 +103,7 @@ Mechanics have commands, and they cost nothing to run:
 | `crate capture` | pull sessions into `raw/` |
 | `crate pending` | which raw sources aren't in the wiki yet |
 | `crate new <type> "<Title>"` | scaffold a page, frontmatter filled in |
+| `crate fmt` | put every page's paragraphs back on one line each |
 | `crate index` | regenerate `index.md` from every page's `summary:` |
 | `crate log <op> --title` | append one entry to `log.md` |
 | `crate lint` | dead wikilinks, orphans, missing index entries |

@@ -250,6 +250,25 @@ def reindex(vault_path: VaultOption = Path(".")) -> None:
     typer.echo(f"Rewrote {path}")
 
 
+@app.command("fmt")
+def format_wiki(vault_path: VaultOption = Path(".")) -> None:
+    """Put every wiki page's paragraphs back on one line each.
+
+    Obsidian renders a single newline inside a paragraph as a line break, so a hard-wrapped page
+    reads as shredded prose in the view the vault exists to be browsed in. Headings, tables, code
+    blocks, blockquotes and explicit hard breaks are left exactly as they are.
+    """
+    try:
+        changed = wiki.format_pages(vault_path)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    for path in changed:
+        typer.echo(f"  reflowed  {path.name}")
+    if not changed:
+        typer.echo("Nothing to reflow.")
+
+
 @app.command("log")
 def log_entry(
     operation: Annotated[str, typer.Argument(help="The operation: ingest, ask, lint.")],

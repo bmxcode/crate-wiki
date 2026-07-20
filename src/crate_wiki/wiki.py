@@ -15,6 +15,7 @@ Two properties everything here holds to:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -352,6 +353,151 @@ def reindex(vault: Path) -> Path:
     path = vault / "index.md"
     path.write_text(render_index(vault, index_header(vault)), encoding="utf-8")
     return path
+
+
+# --------------------------------------------------------------------------------------
+# formatting — one line per paragraph
+# --------------------------------------------------------------------------------------
+#
+# Obsidian renders a single newline inside a paragraph as a line break, so a hard-wrapped page
+# reads as shredded prose in the view the vault exists to be browsed in. Whether a paragraph is
+# on one line has a single right answer, so it's code (ADR-0008) rather than a rule in the prompt
+# that gets forgotten silently across every page.
+#
+# The rule throughout: only ever join lines that are unambiguously prose. Anything structural is
+# copied byte-for-byte. A stray line break is a cosmetic problem; a mangled page is a lost one.
+
+_FENCE = re.compile(r"^\s{0,3}(```|~~~)")
+_ITEM = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+")
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
+_THEMATIC = re.compile(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$")
+_INDENTED_CODE = re.compile(r"^\s{4,}\S")
+# Markdown's two explicit line breaks: two trailing spaces, or a trailing backslash.
+_HARD_BREAK = re.compile(r"( {2,}|\\)$")
+
+
+def _is_structural(line: str) -> bool:
+    """Whether a line belongs to something that must be copied verbatim rather than joined.
+
+    Indentation is deliberately not a signal here. Indented code needs a blank line before it,
+    which would already have ended the chunk — so inside a chunk, four spaces means a list
+    continuation, and treating it as code would leave every nested list hard-wrapped.
+    """
+    stripped = line.lstrip()
+    return bool(
+        _HEADING.match(line) or _THEMATIC.match(line) or stripped.startswith(("|", ">", "<"))
+    )
+
+
+def reflow(text: str) -> str:
+    """Rewrite prose paragraphs onto single lines, leaving every other construct untouched."""
+    lines = text.split("\n")
+    out: list[str] = []
+    index = 0
+
+    if lines and lines[0].strip() == "---":
+        out.append(lines[0])
+        index = 1
+        while index < len(lines):
+            out.append(lines[index])
+            index += 1
+            if out[-1].strip() == "---":
+                break
+
+    while index < len(lines):
+        line = lines[index]
+
+        if _FENCE.match(line):
+            marker = _FENCE.match(line).group(1)
+            out.append(line)
+            index += 1
+            while index < len(lines):
+                out.append(lines[index])
+                index += 1
+                if out[-1].strip().startswith(marker):
+                    break
+            continue
+
+        if not line.strip():
+            out.append(line)
+            index += 1
+            continue
+
+        chunk: list[str] = []
+        while index < len(lines) and lines[index].strip() and not _FENCE.match(lines[index]):
+            chunk.append(lines[index])
+            index += 1
+        out.extend(_reflow_chunk(chunk))
+
+    return "\n".join(out)
+
+
+def _reflow_chunk(chunk: list[str]) -> list[str]:
+    """One blank-line-delimited block: joined if it's plain prose or a list, verbatim otherwise."""
+    if _INDENTED_CODE.match(chunk[0]) or any(_is_structural(line) for line in chunk):
+        return chunk
+    if _ITEM.match(chunk[0]):
+        return _reflow_list(chunk)
+    return _join(chunk)
+
+
+def _reflow_list(chunk: list[str]) -> list[str]:
+    """Fold each list item's continuation lines up onto the item, keeping its own indentation."""
+    out: list[str] = []
+    item: list[str] = []
+
+    for line in chunk:
+        starts_item = _ITEM.match(line)
+        # A continuation only continues if the line above didn't ask for a break.
+        if starts_item or not item or _HARD_BREAK.search(item[-1]):
+            out.extend(_join(item))
+            item = [line]
+        else:
+            item.append(line)
+
+    out.extend(_join(item))
+    return out
+
+
+def _join(lines: list[str]) -> list[str]:
+    """Join lines with single spaces, ending a line wherever an explicit hard break asks for one.
+
+    The first line keeps its indentation (a nested list item stays nested); the rest are stripped
+    before joining, and a hard break's trailing marker is restored so it keeps working.
+    """
+    out: list[str] = []
+    run: list[str] = []
+
+    for line in lines:
+        run.append(line)
+        marker = _HARD_BREAK.search(line)
+        if marker:
+            out.append(_squash(run) + marker.group(1))
+            run = []
+
+    if run:
+        out.append(_squash(run))
+    return out
+
+
+def _squash(parts: list[str]) -> str:
+    """First line keeps its leading indentation; the rest join onto it with single spaces."""
+    head = _HARD_BREAK.sub("", parts[0].rstrip())
+    for piece in parts[1:]:
+        head = f"{head} {_HARD_BREAK.sub('', piece.strip())}"
+    return head
+
+
+def format_pages(vault: Path) -> list[Path]:
+    """Reflow every page under `wiki/`. Returns the pages that actually changed."""
+    changed: list[Path] = []
+    for page in load_pages(vault):
+        before = page.path.read_text(encoding="utf-8")
+        after = reflow(before)
+        if after != before:
+            page.path.write_text(after, encoding="utf-8")
+            changed.append(page.path)
+    return changed
 
 
 # --------------------------------------------------------------------------------------

@@ -260,6 +260,110 @@ def test_a_fresh_vaults_index_is_what_regenerating_would_produce(made):
 
 
 # --------------------------------------------------------------------------------------
+# fmt — one line per paragraph, and nothing else touched
+# --------------------------------------------------------------------------------------
+
+
+def test_a_hard_wrapped_paragraph_becomes_one_line():
+    assert wiki.reflow("One two\nthree four\nfive.\n") == "One two three four five.\n"
+
+
+def test_paragraphs_stay_separate():
+    assert wiki.reflow("One\ntwo.\n\nThree\nfour.\n") == "One two.\n\nThree four.\n"
+
+
+def test_frontmatter_is_never_joined():
+    text = "---\ntype: concept\nsummary: A line.\n---\n\nOne\ntwo.\n"
+    assert wiki.reflow(text) == "---\ntype: concept\nsummary: A line.\n---\n\nOne two.\n"
+
+
+def test_a_fenced_code_block_is_untouched():
+    text = "Prose\nhere.\n\n```python\nx = 1\ny = 2\n```\n\nMore\nprose.\n"
+    result = wiki.reflow(text)
+
+    assert "```python\nx = 1\ny = 2\n```" in result
+    assert "Prose here." in result
+    assert "More prose." in result
+
+
+def test_a_table_is_untouched():
+    text = "| a | b |\n|---|---|\n| 1 | 2 |\n"
+    assert wiki.reflow(text) == text
+
+
+def test_headings_and_blockquotes_are_untouched():
+    text = "# Title\n\n> quoted\n> lines\n"
+    assert wiki.reflow(text) == text
+
+
+def test_list_items_keep_one_line_each_and_absorb_continuations():
+    text = "- first item\n  wrapped on.\n- second item\n"
+    assert wiki.reflow(text) == "- first item wrapped on.\n- second item\n"
+
+
+def test_a_nested_list_item_keeps_its_indentation():
+    text = "- outer\n  - inner item\n    wrapped.\n"
+    assert wiki.reflow(text) == "- outer\n  - inner item wrapped.\n"
+
+
+def test_an_explicit_hard_break_survives():
+    """Two trailing spaces mean the author wanted a break — reflowing must not eat it."""
+    result = wiki.reflow("line one  \nline two\nline three.\n")
+
+    assert result == "line one  \nline two line three.\n"
+
+
+def test_a_backslash_hard_break_survives():
+    assert wiki.reflow("line one\\\nline two.\n") == "line one\\\nline two.\n"
+
+
+def test_reflowing_is_idempotent():
+    text = "One\ntwo.\n\n- item\n  wrapped\n\n```\ncode\n```\n"
+    once = wiki.reflow(text)
+
+    assert wiki.reflow(once) == once
+
+
+def test_an_already_flat_page_is_returned_unchanged():
+    text = "---\ntype: concept\n---\n\n# Title\n\nAll on one line already.\n"
+    assert wiki.reflow(text) == text
+
+
+def test_a_wikilink_spanning_a_line_break_is_repaired(made):
+    """The case that matters: a link broken across lines resolves once the paragraph is one line."""
+    result = wiki.reflow("See the [[Session\nParser]] page.\n")
+
+    assert result == "See the [[Session Parser]] page.\n"
+
+
+def test_format_pages_rewrites_wiki_pages_and_reports_them(made):
+    page = wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    page.write_text("---\ntype: concept\n---\n\n# X\n\nOne\ntwo.\n", encoding="utf-8")
+
+    changed = wiki.format_pages(made)
+
+    assert changed == [page]
+    assert "One two." in page.read_text(encoding="utf-8")
+
+
+def test_format_pages_reports_nothing_when_every_page_is_already_flat(made):
+    wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    wiki.format_pages(made)
+
+    assert wiki.format_pages(made) == []
+
+
+def test_fmt_through_the_cli(made):
+    page = wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    page.write_text("---\ntype: concept\n---\n\n# X\n\nOne\ntwo.\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["fmt", "--vault", str(made)])
+
+    assert result.exit_code == 0
+    assert "Session Parser.md" in result.output
+
+
+# --------------------------------------------------------------------------------------
 # log — append-only
 # --------------------------------------------------------------------------------------
 

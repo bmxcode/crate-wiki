@@ -69,10 +69,11 @@ Then, on each page:
 Then close the loop:
 
 ```
+crate fmt --vault .
 crate index --vault .
 crate log ingest --title "<the source's title>" --vault .
 ```
 
-Both are mechanical and neither is optional. `crate index` regenerates `index.md` from the `summary:` you just wrote — so don't edit `index.md` by hand, your edits get discarded.
+All three are mechanical and none is optional. `crate fmt` puts each paragraph back on one line, because Obsidian renders a single newline inside a paragraph as a line break — don't hand-wrap prose to a column, and don't worry if you did. `crate index` regenerates `index.md` from the `summary:` you just wrote, so don't edit `index.md` by hand; your edits get discarded.
 
 Finish by telling me what you wrote and what you deliberately left out.
