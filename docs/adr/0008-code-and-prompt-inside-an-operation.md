@@ -99,7 +99,7 @@ break — editing the index is no longer merely redundant, it's discarded on the
 The `summary:` field means the shipped page templates changed, which is what forced
 [ADR-0009](0009-engine-owned-vault-files.md).
 
-**Constraint this imposes.** Every operation from here — `/ask` (D5), `/lint` (D6), `/daily` (D8) —
+**Constraint this imposes.** Every operation from here — `/ask` (D5), `/daily` (D6), the linter (D8) —
 gets this table written into its own record: each step, and which side it falls on. A step with one
 right answer may not be handed to the model on the grounds that the steps around it are judgment.
 And the reverse holds with equal force: `crate` gains no subcommand for a step that requires a
