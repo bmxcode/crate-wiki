@@ -6,13 +6,7 @@ history is exposed retroactively when it goes public (see CLAUDE.md and the D2 i
 
 import json
 
-from typer.testing import CliRunner
-
 from crate_wiki import session, vault
-from crate_wiki.cli import app
-
-runner = CliRunner()
-
 
 # --------------------------------------------------------------------------------------
 # a tiny builder for synthetic session trees
@@ -443,35 +437,3 @@ def test_capture_rewrites_a_deleted_card_even_if_the_cursor_matches(tmp_path):
     second = session.capture(path, target, crate_version="0.1.0")
     assert second.written
     assert second.card_path.is_file()
-
-
-# --------------------------------------------------------------------------------------
-# the CLI surface
-# --------------------------------------------------------------------------------------
-
-
-def test_cli_capture_writes_and_reports(tmp_path):
-    target = make_vault(tmp_path)
-    path = write_session(tmp_path, LINEAR)
-
-    first = runner.invoke(app, ["capture", str(path), "--vault", str(target)])
-    assert first.exit_code == 0, first.output
-    assert "Captured" in first.output
-
-    second = runner.invoke(app, ["capture", str(path), "--vault", str(target)])
-    assert second.exit_code == 0, second.output
-    assert "nothing new" in second.output
-
-
-def test_cli_capture_errors_when_the_target_is_not_a_vault(tmp_path):
-    path = write_session(tmp_path, LINEAR)
-    result = runner.invoke(app, ["capture", str(path), "--vault", str(tmp_path / "nope")])
-    assert result.exit_code == 1
-    assert "not a crate vault" in result.output
-
-
-def test_cli_capture_errors_on_a_missing_session_file(tmp_path):
-    target = make_vault(tmp_path)
-    result = runner.invoke(app, ["capture", str(tmp_path / "ghost.jsonl"), "--vault", str(target)])
-    assert result.exit_code == 1
-    assert "no such session file" in result.output

@@ -4,13 +4,14 @@ Everything here is deterministic: the CLI does mechanics so the LLM can spend it
 tokens on judgment. See docs/adr/0004-deterministic-cli.md.
 """
 
+import sys
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from crate_wiki import __version__, session, vault
+from crate_wiki import __version__, hook, vault
 
 app = typer.Typer(
     name="crate",
@@ -71,27 +72,64 @@ def init(
     typer.echo(f"Next: open {path} in Obsidian, and read CLAUDE.md.")
 
 
-@app.command()
-def capture(
-    session_file: Annotated[Path, typer.Argument(help="A Claude Code session JSONL file.")],
-    vault_path: Annotated[Path, typer.Option("--vault", help="Vault to write the card into.")],
-) -> None:
-    """Turn a session JSONL into a session card in the vault. Free, deterministic, idempotent.
+capture_app = typer.Typer(
+    help="Capture a session into a vault as a card. Free, deterministic, idempotent.",
+    no_args_is_help=True,
+)
+app.add_typer(capture_app, name="capture")
 
-    Re-running on the same session writes nothing new; a resumed session re-renders its card.
-    The Stop hook (ADR-0002) is what calls this on every session — but it stands alone too.
+
+@capture_app.command("claude")
+def capture_claude(
+    vault_path: Annotated[
+        Path | None,
+        typer.Option("--vault", help="Vault to write the card into."),
+    ] = None,
+    transcript: Annotated[
+        Path | None,
+        typer.Option("--transcript", help="A session JSONL to capture instead of reading stdin."),
+    ] = None,
+) -> None:
+    """Capture the current Claude Code session, driven by its Stop hook.
+
+    The hook feeds Stop-event JSON on stdin; `--transcript FILE` bypasses that for manual runs.
+    Either way this is fail-quiet by contract (ADR-0002): it never breaks session exit, always
+    exits 0, and writes every outcome — success or failure — to ~/.claude/crate-capture.log.
+    """
+    stdin_text = ""
+    if transcript is None and not sys.stdin.isatty():
+        try:
+            stdin_text = sys.stdin.read()
+        except Exception:  # noqa: BLE001 — a broken stdin must not break session exit either
+            stdin_text = ""
+
+    hook.capture_from_hook(
+        vault_path=vault_path,
+        transcript=transcript,
+        stdin_text=stdin_text,
+        crate_version=__version__,
+    )
+
+
+@app.command("install-hook")
+def install_hook(
+    vault_path: Annotated[Path, typer.Option("--vault", help="Vault captured sessions land in.")],
+) -> None:
+    """Wire `crate capture claude` into ~/.claude/settings.json as a Stop hook.
+
+    Idempotent and non-destructive: re-running updates our entry in place and leaves any other
+    Stop hooks alone. Point it at one vault per machine (that's the isolation model — ADR-0001).
     """
     try:
-        result = session.capture(session_file, vault_path, crate_version=__version__)
+        status = hook.install(vault_path)
     except vault.VaultError as error:
         typer.secho(f"crate: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from error
 
-    rel = result.card_path.relative_to(vault_path.expanduser().resolve())
-    if result.written:
-        typer.echo(f"Captured {result.session_id[:8]} → {rel}")
-    else:
-        typer.echo(f"{result.session_id[:8]} already captured, nothing new")
+    typer.echo(f"Stop hook {status}")
+    typer.echo("")
+    typer.echo("Every session now captures to the vault on exit — zero tokens, never blocking.")
+    typer.echo(f"Outcomes are logged to {hook.LOG_PATH}.")
 
 
 @app.command(hidden=True)
