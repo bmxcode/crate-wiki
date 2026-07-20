@@ -95,6 +95,44 @@ What to expect:
 
 Capture keeps *everything* — deciding which sessions are worth folding into the wiki is a judgment call that happens later, when you run `/ingest`.
 
+## Ingest, when you're ready
+
+`/ingest` is the first paid operation: it reads a raw source, works out what mattered, and folds it into the wiki. It's a slash command inside the vault, so run it from a Claude Code session there.
+
+```
+/ingest                                    # take the oldest pending source
+/ingest raw/sessions/claude-code/2026-07-20-abcd1234.md
+```
+
+**It stops and talks to you before it writes anything.** You get the takeaways and a numbered page plan — create this, extend that, here's a contradiction with a page you already have — and nothing is written until you reply. That step is the difference between a thinking tool and a summarizer, so it isn't optional and there's no flag to skip it.
+
+Then it writes the pages, regenerates `index.md`, and appends one line to `log.md`.
+
+Four things underneath it are mechanical, so they're commands rather than judgment calls ([ADR-0008](docs/adr/0008-code-and-prompt-inside-an-operation.md)) — useful on their own:
+
+```bash
+crate pending --vault .                    # raw sources not yet in the wiki
+crate new concept "Session Parser" --vault .
+crate index --vault .                      # regenerate index.md from page frontmatter
+crate log ingest --title "Session Parser" --vault .
+```
+
+Two consequences worth knowing:
+
+- **`index.md` is generated — don't edit it.** A page's one-line index entry lives in its own `summary:` frontmatter, and `crate index` reads it from there. Anything you type into `index.md` below the header is discarded on the next regeneration.
+- **Re-running `/ingest` can't duplicate a page.** Whether a source is already ingested is read off the `sources:` frontmatter of `wiki/sources/` pages, so it's committed with the vault and travels with it. Delete a source page and its raw file becomes pending again, which is what you want.
+
+## Upgrading a vault
+
+Most of the engine lives in the installed package, so `uv tool upgrade crate-wiki` is usually all there is to it. Two kinds of file are exceptions — slash commands and page templates have to sit inside the vault — so a release that changes those needs one command per vault:
+
+```bash
+uv tool upgrade crate-wiki
+crate upgrade ~/crate-personal
+```
+
+It refreshes only what the engine owns: `.claude/commands/` and `.crate/templates/`. Everything you author — `CLAUDE.md`, `index.md`, `log.md`, `wiki/`, `raw/`, and your `config.toml` settings — is left alone. If your `CLAUDE.md` has drifted from the schema the current version ships, it says so and lets you decide; it never merges Layer 3 for you. `--dry-run` shows what would change. See [ADR-0009](docs/adr/0009-engine-owned-vault-files.md).
+
 ## Design
 
 - [Architecture](docs/architecture.md) — the layers, the tiers, and the data flow

@@ -67,8 +67,15 @@ class VaultError(Exception):
     """Something went wrong that the user needs to fix."""
 
 
-def _template(*parts: str) -> str:
+def template_text(*parts: str) -> str:
+    """A template shipped inside the package. Public because `wiki` regenerates from these too."""
     return (files("crate_wiki") / "templates").joinpath(*parts).read_text(encoding="utf-8")
+
+
+def _template_names(*parts: str) -> list[str]:
+    """The filenames in a shipped template directory, sorted."""
+    directory = (files("crate_wiki") / "templates").joinpath(*parts)
+    return sorted(entry.name for entry in directory.iterdir() if entry.is_file())
 
 
 def _render(text: str, **values: str) -> str:
@@ -222,17 +229,17 @@ def _schema(scope: str, preset: Preset, vault_name: str) -> str:
         private_block = (
             "\n"
             + _render(
-                _template("vault", "private-sections.md.tmpl"), section_list=section_list
+                template_text("vault", "private-sections.md.tmpl"), section_list=section_list
             ).strip()
             + "\n"
         )
     else:
         private_block = ""
 
-    scope_block = "\n" + _template("vault", f"scope-{scope}.md").strip()
+    scope_block = "\n" + template_text("vault", f"scope-{scope}.md").strip()
 
     schema = _render(
-        _template("vault", "CLAUDE.md.tmpl"),
+        template_text("vault", "CLAUDE.md.tmpl"),
         vault_name=vault_name,
         scope=scope,
         private_sections=private_block,
@@ -312,9 +319,9 @@ def create(path: Path, scope: str, *, version: str, today: str | None = None) ->
     vault.mkdir(parents=True, exist_ok=True)
 
     _write(vault / "CLAUDE.md", _schema(scope, preset, vault.name))
-    _write(vault / "AGENTS.md", _template("vault", "AGENTS.md"))
-    _write(vault / "index.md", _template("vault", "index.md"))
-    _write(vault / "log.md", _render(_template("vault", "log.md.tmpl"), today=today))
+    _write(vault / "AGENTS.md", template_text("vault", "AGENTS.md"))
+    _write(vault / "index.md", template_text("vault", "index.md"))
+    _write(vault / "log.md", _render(template_text("vault", "log.md.tmpl"), today=today))
     _write(vault / ".gitignore", _gitignore(preset))
 
     for section in preset.sections:
@@ -334,10 +341,104 @@ def create(path: Path, scope: str, *, version: str, today: str | None = None) ->
     )
     _write(vault / ".crate" / "state.json", "{}\n")
 
-    for page_type in PAGE_TYPES:
-        _write(
-            vault / ".crate" / "templates" / f"{page_type}.md",
-            _template("pages", f"{page_type}.md"),
-        )
+    for source, destination in engine_files():
+        _write(vault.joinpath(*destination), template_text(*source))
 
     return _init_git(vault, preset)
+
+
+# --------------------------------------------------------------------------------------
+# upgrading an existing vault
+# --------------------------------------------------------------------------------------
+
+
+def engine_files() -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Files the engine owns inside a vault, as (shipped template, vault destination).
+
+    `create` writes these and `upgrade` rewrites them, from one list so the two can't drift.
+    Everything else in a vault is authored — see ADR-0009. Slash commands have to be on disk
+    for Claude Code to find them, which is why they're copied rather than read from the package.
+    """
+    pairs: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    for name in _template_names("pages"):
+        pairs.append((("pages", name), (".crate", "templates", name)))
+    for name in _template_names("commands"):
+        pairs.append((("commands", name), (".claude", "commands", name)))
+    return pairs
+
+
+@dataclass
+class UpgradeReport:
+    """What an upgrade did, or would do. `schema_drifted` is reported and never acted on."""
+
+    created: list[str]
+    updated: list[str]
+    unchanged: list[str]
+    schema_drifted: bool
+    dry_run: bool
+
+
+def upgrade(path: Path, *, version: str, dry_run: bool = False) -> UpgradeReport:
+    """Refresh the engine-owned files in an existing vault. Returns what changed.
+
+    Authored files are never written: `CLAUDE.md`, `index.md`, `log.md`, `wiki/` and `raw/` are
+    yours. `CLAUDE.md` is the interesting one — the engine ships its template, so a shipped
+    change can't reach a vault whose schema you've since edited. Upgrade reports that drift and
+    stops there rather than merging, because Layer 3 is the highest-leverage file in a vault and
+    a bad automatic merge to it is worse than a manual edit you chose to make.
+    """
+    vault = path.expanduser().resolve()
+    config = load_config(vault)  # raises VaultError when it isn't a vault
+
+    report = UpgradeReport([], [], [], schema_drifted=False, dry_run=dry_run)
+
+    for source, destination in engine_files():
+        target = vault.joinpath(*destination)
+        shipped = template_text(*source)
+        relative = "/".join(destination)
+
+        if not target.exists():
+            report.created.append(relative)
+        elif target.read_text(encoding="utf-8") == shipped:
+            report.unchanged.append(relative)
+            continue
+        else:
+            report.updated.append(relative)
+
+        if not dry_run:
+            _write(target, shipped)
+
+    report.schema_drifted = _schema_drifted(vault, config)
+
+    if not dry_run:
+        _bump_version(vault, version)
+
+    return report
+
+
+def _schema_drifted(vault: Path, config: dict) -> bool:
+    """Whether the vault's CLAUDE.md differs from what this engine version would ship."""
+    scope = str(config.get("scope", ""))
+    preset = PRESETS.get(scope)
+    schema = vault / "CLAUDE.md"
+    if preset is None or not schema.is_file():
+        return False
+    return schema.read_text(encoding="utf-8") != _schema(scope, preset, vault.name)
+
+
+def _bump_version(vault: Path, version: str) -> None:
+    """Rewrite just the `crate_version` line in config.toml, leaving every other line alone.
+
+    A line edit rather than a re-render: config.toml holds the vault's own settings (the push
+    allowlist among them), and regenerating it from the preset would quietly discard them.
+    """
+    path = vault / ".crate" / "config.toml"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    changed = [
+        f'crate_version = "{version}"' if line.startswith("crate_version") else line
+        for line in lines
+    ]
+    path.write_text("\n".join(changed) + "\n", encoding="utf-8")
