@@ -6,9 +6,14 @@ allowed-tools: Bash(crate:*), Read, Write, Edit, Glob, Grep
 
 Fold new raw sources into this wiki.
 
-This is the expensive operation — one source usually touches 10–15 pages. Two rules make it
-affordable and make it worth doing at all: **you discuss before you write**, and **you never read
-a page you can't justify**. Both are enforced by the phases below. Don't collapse them.
+This is the expensive operation — one source usually touches 10–15 pages that already exist. Two
+rules make it affordable and make it worth doing at all: **you discuss before you write**, and
+**you never read a page you can't justify**. Both are enforced by the phases below. Don't collapse
+them.
+
+That 10–15 is a count of pages *touched*, not created. In an early vault where little exists yet,
+the right answer is a handful of pages that each say something — not a dozen stubs written to hit
+a number.
 
 Read `CLAUDE.md` first if you haven't this session. `raw/` is immutable — you read it, never write it.
 
@@ -41,6 +46,11 @@ Now write me:
 2. **The page plan**, as a numbered list. For each: `create <type> "<Title>"` or `extend [[Page]]`,
    and one line on what goes there. Extend before you create — a new fact about an existing thing
    belongs on that thing's page, and new pages are for new things, not new mentions.
+
+   `<type>` is **`source`, `entity` or `concept`** — those are the three this operation writes.
+   One `source` page per raw file, always. `entity` is a person, project, repo, system or company;
+   `concept` is an idea, pattern or technique, and a format or a protocol is a concept, not an
+   entity. If something fits none of the three, say so rather than bending one to fit.
 3. **Contradictions**, if this source disagrees with a page. Show me both sides. Never resolve one
    silently.
 4. **What you're unsure about.** A named gap beats a confident page that's wrong.
@@ -66,6 +76,12 @@ crate new source "<Title>" --vault . --raw raw/sessions/claude-code/<file>.md
 
 `--raw` is what makes re-running `/ingest` skip this source instead of duplicating it, so the source
 page's path has to be the real one.
+
+**Don't write `wiki/daily/` or `wiki/syntheses/` here.** A daily page is one *day* across every
+source, which is `/daily`'s job, and a synthesis answers a question you asked, which is `/ask`'s.
+Writing either from a single source claims a scope you don't have and leaves those operations
+reconciling pages they didn't write. If a day or a question is worth a page, say so and I'll run
+the operation that owns it.
 
 Then, on each page:
 
