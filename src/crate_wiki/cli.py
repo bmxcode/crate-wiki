@@ -11,7 +11,11 @@ from typing import Annotated
 
 import typer
 
-from crate_wiki import __version__, hook, vault
+from crate_wiki import __version__, hook, vault, wiki
+
+# Every command below takes the vault it works on. Defaulting to the cwd is the common case by
+# far — you run these from inside the vault, or from a slash command whose cwd is the vault.
+VaultOption = Annotated[Path, typer.Option("--vault", help="Vault to work on.")]
 
 app = typer.Typer(
     name="crate",
@@ -62,6 +66,10 @@ def init(
 
     for warning in warnings:
         typer.secho(f"crate: {warning}", fg=typer.colors.YELLOW, err=True)
+
+    # index.md is generated (ADR-0008). Generating it now rather than shipping a static skeleton
+    # means a brand-new vault's index is byte-identical to what `crate index` would produce.
+    wiki.reindex(path.expanduser().resolve())
 
     typer.echo(f"Created a {scope.value} vault at {path}")
     typer.echo("")
@@ -130,6 +138,153 @@ def install_hook(
     typer.echo("")
     typer.echo("Every session now captures to the vault on exit — zero tokens, never blocking.")
     typer.echo(f"Outcomes are logged to {hook.LOG_PATH}.")
+
+
+# --------------------------------------------------------------------------------------
+# the mechanical half of /ingest — see ADR-0008
+# --------------------------------------------------------------------------------------
+
+
+def _fail(error: vault.VaultError) -> typer.Exit:
+    typer.secho(f"crate: {error}", fg=typer.colors.RED, err=True)
+    return typer.Exit(1)
+
+
+@app.command()
+def upgrade(
+    vault_path: Annotated[Path, typer.Argument(help="Vault to upgrade.")] = Path("."),
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would change and write nothing.")
+    ] = False,
+) -> None:
+    """Refresh the engine-owned files in an existing vault: page templates and slash commands.
+
+    Never touches what you author — CLAUDE.md, index.md, log.md, wiki/, raw/ (ADR-0009). A
+    CLAUDE.md that has drifted from the shipped schema is reported, never merged.
+    """
+    try:
+        report = vault.upgrade(vault_path, version=__version__, dry_run=dry_run)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    labels = ("would add", "would update") if report.dry_run else ("added", "updated")
+    width = max(len(label) for label in labels)
+    for label, names in zip(labels, (report.created, report.updated), strict=True):
+        for name in names:
+            typer.echo(f"  {label.ljust(width)}  {name}")
+
+    if not report.created and not report.updated:
+        typer.echo("Already up to date.")
+    elif report.dry_run:
+        typer.echo("\nNothing was written (--dry-run).")
+
+    if report.schema_drifted:
+        typer.secho(
+            "\ncrate: this vault's CLAUDE.md differs from the schema this version ships.\n"
+            "crate: that file is yours, so it wasn't touched — diff it against the template\n"
+            "crate: if you want the newer wording.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+
+
+@app.command()
+def pending(
+    vault_path: VaultOption = Path("."),
+    show_all: Annotated[
+        bool, typer.Option("--all", help="List ingested sources too, not just new ones.")
+    ] = False,
+) -> None:
+    """List raw sources the wiki hasn't folded in yet.
+
+    The ledger is the `sources:` frontmatter on wiki/sources/ pages, so this is idempotent by
+    construction: ingest a source and it stops being listed. Private sections never appear
+    (ADR-0006). Prints nothing and exits 0 when there's nothing to do.
+    """
+    try:
+        items = wiki.pending(vault_path, include_all=show_all)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    # A plain path per line in the common case, so the output stays easy to read and to pipe;
+    # anything that isn't simply new gets its status appended.
+    for item in items:
+        typer.echo(item.path if item.status == "new" else f"{item.path}\t{item.status}")
+
+
+@app.command("new")
+def new_page(
+    page_type: Annotated[str, typer.Argument(help="source, entity, concept, synthesis or daily.")],
+    title: Annotated[str, typer.Argument(help="The page title — also its filename and H1.")],
+    vault_path: VaultOption = Path("."),
+    raw: Annotated[
+        str | None,
+        typer.Option("--raw", help="Raw path this page summarises. Required for a source page."),
+    ] = None,
+) -> None:
+    """Scaffold a wiki page from the vault's template, with the frontmatter filled in.
+
+    Refuses to overwrite an existing page — extending one is an edit.
+    """
+    try:
+        path = wiki.new_page(vault_path, page_type, title, raw=raw)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    typer.echo(path)
+
+
+@app.command("index")
+def reindex(vault_path: VaultOption = Path(".")) -> None:
+    """Regenerate index.md from every page's `summary:` frontmatter.
+
+    index.md is derived, not authored (ADR-0008): a page's one-liner lives on the page. Pages are
+    grouped by directory rather than by the type they claim, so a page with broken frontmatter is
+    still listed — being absent from the index is the one failure it exists to prevent.
+    """
+    try:
+        path = wiki.reindex(vault_path)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    typer.echo(f"Rewrote {path}")
+
+
+@app.command("fmt")
+def format_wiki(vault_path: VaultOption = Path(".")) -> None:
+    """Put every wiki page's paragraphs back on one line each.
+
+    Obsidian renders a single newline inside a paragraph as a line break, so a hard-wrapped page
+    reads as shredded prose in the view the vault exists to be browsed in. Headings, tables, code
+    blocks, blockquotes and explicit hard breaks are left exactly as they are.
+    """
+    try:
+        changed = wiki.format_pages(vault_path)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    for path in changed:
+        typer.echo(f"  reflowed  {path.name}")
+    if not changed:
+        typer.echo("Nothing to reflow.")
+
+
+@app.command("log")
+def log_entry(
+    operation: Annotated[str, typer.Argument(help="The operation: ingest, ask, lint.")],
+    title: Annotated[str, typer.Option("--title", help="What the entry is about.")],
+    vault_path: VaultOption = Path("."),
+) -> None:
+    """Append one `## [YYYY-MM-DD] op | Title` entry to log.md.
+
+    Append-only: prior lines are never read for content, rewritten or reordered.
+    """
+    try:
+        line = wiki.append_log(vault_path, operation, title)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    typer.echo(line)
 
 
 @app.command(hidden=True)

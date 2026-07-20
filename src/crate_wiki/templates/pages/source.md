@@ -1,5 +1,6 @@
 ---
 type: source
+summary:
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 sources: ["raw/sessions/claude-code/example.md"]

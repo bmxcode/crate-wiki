@@ -1,5 +1,6 @@
 ---
 type: entity
+summary:
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 sources: ["[[Source Page Name]]"]
