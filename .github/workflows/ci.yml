@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A green suite only proves the code worked on the day it ran. D4 shipped tests that passed on
+  # merge and failed four days later, because the trigger was the calendar rather than a commit —
+  # so main went red with nothing to notice it. This catches that class of drift, along with
+  # anything a dependency release breaks under us.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
 
 jobs:
   check:
@@ -27,6 +34,12 @@ jobs:
 
       - name: Test
         run: uv run pytest -q
+
+      # Catches a test that asserts on the real current date, on the PR that introduces it
+      # rather than when the year turns over. It does not catch mtime-versus-hardcoded-date
+      # drift, which is what the nightly run is for. See tests/conftest.py.
+      - name: Test against a future clock
+        run: CRATE_TEST_CLOCK=2027-03-01 uv run pytest -q
 
       # The command has to work when installed, not just under `uv run` —
       # that is the actual contract with a user.

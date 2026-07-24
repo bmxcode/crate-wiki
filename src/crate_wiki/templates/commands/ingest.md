@@ -64,7 +64,14 @@ Then, on each page:
 - Write prose, not bullets of bullets. You're writing for someone who has forgotten everything.
 - Link inline, in the sentence where the thing comes up: `the [[Session Parser]] drops tool output`, not a "Related" heading at the bottom. Fan out generously — that fan-out *is* the compounding.
 - **Never link a page you haven't created.** A dead wikilink is a lie about what the wiki knows.
-- On a page you're extending, set `updated:` to today and leave `created:` alone.
+
+On a page you're **extending** rather than creating, record it — don't hand-edit the frontmatter:
+
+```
+crate extend "<Title>" --source "[[<the source page you just wrote>]]" --vault .
+```
+
+That bumps `updated:`, leaves `created:` alone, and adds the source only if it isn't already there. On a source page `sources:` is what makes `/ingest` skip work it has already done, so it's not a field to edit by hand.
 
 Then close the loop:
 
