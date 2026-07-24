@@ -277,11 +277,16 @@ def new_page(
 
 
 def _fill(template: str, title: str, raw: str | None, today: str) -> str:
-    """Stamp the title, today's date and (for a source) the raw path into a template.
+    """Stamp the title, today's date and the source into a template.
 
     The templates carry literal `YYYY-MM-DD` and a placeholder H1 rather than `$` substitutions,
     so they stay readable as skeletons in Obsidian. Dates are only replaced inside the
     frontmatter — a body that discusses a date shouldn't be rewritten.
+
+    `sources:` is always rewritten, even to an empty list. The skeletons carry a placeholder
+    (`["[[Source Page Name]]"]`) that reads as an example but would ship as a dead wikilink on
+    every page — and "never link a page you haven't created" is the rule the whole link graph
+    depends on. An empty list is honest; `crate extend` fills it.
     """
     lines = template.splitlines()
     in_frontmatter = bool(lines) and lines[0].strip() == "---"
@@ -295,8 +300,8 @@ def _fill(template: str, title: str, raw: str | None, today: str) -> str:
             continue
 
         if in_frontmatter:
-            if raw and line.startswith("sources:"):
-                line = f'sources: ["{raw}"]'
+            if line.startswith("sources:"):
+                line = f'sources: ["{raw}"]' if raw else "sources: []"
             else:
                 line = line.replace("YYYY-MM-DD", today)
         elif not h1_done and line.startswith("# "):
@@ -306,6 +311,76 @@ def _fill(template: str, title: str, raw: str | None, today: str) -> str:
         out.append(line)
 
     return "\n".join(out) + "\n"
+
+
+def extend_page(
+    vault: Path,
+    title: str,
+    *,
+    source: str | None = None,
+    today: str | None = None,
+) -> tuple[Path, bool]:
+    """Record that `title` absorbed new material. Returns the page and whether it changed.
+
+    Two mechanical edits, both of which the model otherwise makes by hand: `updated:` moves to
+    today, and `source` joins `sources:` if it isn't already there. `created:` is never touched.
+
+    The `sources:` half is the one that matters. On a `wiki/sources/` page that field *is* the
+    ingest ledger, so a malformed append silently breaks idempotency and the raw file comes back
+    as pending forever — the failure the derived ledger exists to prevent, reintroduced by hand.
+    """
+    path = find_page(vault, title)
+    text = path.read_text(encoding="utf-8")
+    stamp = today or date.today().isoformat()
+
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        raise VaultError(f"{path} has no frontmatter — can't record an extension on it")
+
+    try:
+        closing = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
+    except StopIteration as error:
+        raise VaultError(f"{path} has an unterminated frontmatter block") from error
+
+    changed = False
+    for index in range(1, closing):
+        key, sep, value = lines[index].partition(":")
+        if not sep:
+            continue
+        if key.strip() == "updated" and value.strip() != stamp:
+            lines[index] = f"updated: {stamp}"
+            changed = True
+        elif key.strip() == "sources" and source:
+            existing = parse_list(value)
+            if source not in existing:
+                joined = ", ".join(f'"{item}"' for item in (*existing, source))
+                lines[index] = f"sources: [{joined}]"
+                changed = True
+
+    if changed:
+        path.write_text("\n".join(lines), encoding="utf-8")
+    return path, changed
+
+
+def find_page(vault: Path, title: str) -> Path:
+    """The page called `title`, wherever it lives under `wiki/`.
+
+    Titles are globally unique by construction — the filename is the title is the wikilink — so a
+    bare title is enough to find a page. Both failure modes refuse rather than guess: an unknown
+    title is a typo (creating a page here would hide it; that's `crate new`'s job), and a title
+    held by two page types means the vault has already broken the invariant wikilinks rest on.
+    """
+    title = title.strip().removeprefix("[[").removesuffix("]]").strip()
+    if not title:
+        raise VaultError("which page? give the title, exactly as it appears in [[links]]")
+
+    matches = [page.path for page in load_pages(vault) if page.title == title]
+    if not matches:
+        raise VaultError(f"no page called {title!r} — create it with `crate new` first")
+    if len(matches) > 1:
+        where = ", ".join(str(path.parent.name) for path in matches)
+        raise VaultError(f"{title!r} exists in more than one place ({where}) — refusing to guess")
+    return matches[0]
 
 
 # --------------------------------------------------------------------------------------

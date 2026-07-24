@@ -3,6 +3,9 @@
 Fixtures are synthetic and built in tmp_path — no real vault content reaches this repo.
 """
 
+import os
+from datetime import datetime
+
 import pytest
 from typer.testing import CliRunner
 
@@ -11,23 +14,34 @@ from crate_wiki.cli import app
 
 runner = CliRunner()
 
-
-@pytest.fixture
-def made(tmp_path):
-    """An empty personal vault, plus one captured-looking raw session."""
-    target = tmp_path / "vault"
-    result = runner.invoke(app, ["init", str(target), "--scope", "personal"])
-    assert result.exit_code == 0, result.output
-    raw = target / "raw" / "sessions" / "claude-code" / "2026-07-20-abcd1234.md"
-    raw.write_text("---\nsource: claude-code\n---\n\n# branch · 2026-07-20\n", encoding="utf-8")
-    return target
-
-
+# Staleness compares a raw file's mtime against its page's `updated:`, so a fixture that writes
+# the raw file *now* and dates the page in the past is stale the moment the real clock passes
+# that date. Pin both to the same fixed day instead: these tests are about the ledger, not about
+# what day it happens to be when they run.
+TODAY = "2026-07-20"
 RAW = "raw/sessions/claude-code/2026-07-20-abcd1234.md"
 
 
+@pytest.fixture
+def made(tmp_path):
+    """An empty personal vault, plus one captured-looking raw session dated TODAY."""
+    target = tmp_path / "vault"
+    result = runner.invoke(app, ["init", str(target), "--scope", "personal"])
+    assert result.exit_code == 0, result.output
+    raw = target / RAW
+    raw.write_text("---\nsource: claude-code\n---\n\n# branch · 2026-07-20\n", encoding="utf-8")
+    touch(raw, TODAY)
+    return target
+
+
+def touch(path, day):
+    """Set a file's mtime to midday on `day`, so staleness doesn't depend on the wall clock."""
+    stamp = datetime.fromisoformat(f"{day}T12:00:00").timestamp()
+    os.utime(path, (stamp, stamp))
+
+
 def source_page(target, title="Fake Session", raw=RAW):
-    return wiki.new_page(target, "source", title, raw=raw, today="2026-07-20")
+    return wiki.new_page(target, "source", title, raw=raw, today=TODAY)
 
 
 # --------------------------------------------------------------------------------------
@@ -92,12 +106,10 @@ def test_private_sections_never_appear(made):
 
 
 def test_a_raw_file_newer_than_its_page_is_stale(made):
+    """A resumed session rewrites its card, so an ingested source can outrun the page about it."""
     source_page(made)
-    page = made / "wiki" / "sources" / "Fake Session.md"
-    page.write_text(
-        page.read_text(encoding="utf-8").replace("updated: 2026-07-20", "updated: 2020-01-01"),
-        encoding="utf-8",
-    )
+    touch(made / RAW, "2026-07-24")
+
     assert [item.status for item in wiki.pending(made)] == ["stale"]
 
 
@@ -108,7 +120,7 @@ def test_all_lists_ingested_sources_without_calling_them_stale(made):
 
 def test_wikilink_sources_on_other_page_types_never_match_a_raw_file(made):
     """Non-source pages carry `[[Page]]` in `sources:`, which must not shadow a raw path."""
-    wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    wiki.new_page(made, "concept", "Session Parser", today=TODAY)
     assert len(wiki.pending(made)) == 1
 
 
@@ -123,14 +135,14 @@ def test_pending_on_a_directory_that_is_not_a_vault(tmp_path):
 
 
 def test_a_scaffolded_page_gets_the_title_as_filename_and_h1(made):
-    path = wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    path = wiki.new_page(made, "concept", "Session Parser", today=TODAY)
 
     assert path == made / "wiki" / "concepts" / "Session Parser.md"
     assert "# Session Parser" in path.read_text(encoding="utf-8")
 
 
 def test_dates_are_stamped_in_the_frontmatter(made):
-    path = wiki.new_page(made, "entity", "crate-wiki", today="2026-07-20")
+    path = wiki.new_page(made, "entity", "crate-wiki", today=TODAY)
     fields = wiki.read_frontmatter(path.read_text(encoding="utf-8"))
 
     assert fields["created"] == "2026-07-20"
@@ -147,6 +159,15 @@ def test_a_source_page_records_the_raw_path_it_came_from(made):
     )
 
 
+def test_a_scaffolded_page_ships_no_placeholder_wikilink(made):
+    """The skeletons carry `[[Source Page Name]]` as an example; shipping it is a dead link."""
+    path = wiki.new_page(made, "concept", "Session Parser", today=TODAY)
+    text = path.read_text(encoding="utf-8")
+
+    assert "Source Page Name" not in text
+    assert wiki.parse_list(wiki.read_frontmatter(text)["sources"]) == ()
+
+
 def test_a_source_page_without_raw_is_refused(made):
     """Without it there's no ledger entry, so the next /ingest would duplicate the page."""
     with pytest.raises(vault.VaultError, match="--raw"):
@@ -154,20 +175,20 @@ def test_a_source_page_without_raw_is_refused(made):
 
 
 def test_scaffolding_never_overwrites_an_existing_page(made):
-    wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    wiki.new_page(made, "concept", "Session Parser", today=TODAY)
     with pytest.raises(vault.VaultError, match="already exists"):
-        wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+        wiki.new_page(made, "concept", "Session Parser", today=TODAY)
 
 
 @pytest.mark.parametrize("title", ["a/b", "../escape", "a[b]", "a|b", "a#b", ""])
 def test_titles_that_would_break_a_filename_or_a_wikilink_are_refused(made, title):
     with pytest.raises(vault.VaultError):
-        wiki.new_page(made, "concept", title, today="2026-07-20")
+        wiki.new_page(made, "concept", title, today=TODAY)
 
 
 def test_an_unknown_page_type_is_refused(made):
     with pytest.raises(vault.VaultError, match="unknown page type"):
-        wiki.new_page(made, "essay", "Whatever", today="2026-07-20")
+        wiki.new_page(made, "essay", "Whatever", today=TODAY)
 
 
 def test_scaffolding_uses_the_vaults_template_not_the_packages(made):
@@ -176,7 +197,7 @@ def test_scaffolding_uses_the_vaults_template_not_the_packages(made):
         "---\ntype: concept\ncreated: YYYY-MM-DD\n---\n\n# Title\n\nhouse style\n",
         encoding="utf-8",
     )
-    path = wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    path = wiki.new_page(made, "concept", "Session Parser", today=TODAY)
 
     assert "house style" in path.read_text(encoding="utf-8")
 
@@ -186,10 +207,124 @@ def test_a_date_in_the_body_is_not_rewritten(made):
         "---\ntype: concept\ncreated: YYYY-MM-DD\n---\n\n# Title\n\nShipped on YYYY-MM-DD.\n",
         encoding="utf-8",
     )
-    body = wiki.new_page(made, "concept", "X", today="2026-07-20").read_text(encoding="utf-8")
+    body = wiki.new_page(made, "concept", "X", today=TODAY).read_text(encoding="utf-8")
 
     assert "Shipped on YYYY-MM-DD." in body
     assert "created: 2026-07-20" in body
+
+
+# --------------------------------------------------------------------------------------
+# extend — the two mechanical edits of absorbing a source
+# --------------------------------------------------------------------------------------
+
+
+def test_extending_moves_updated_to_today_and_leaves_created_alone(made):
+    page = wiki.new_page(made, "concept", "Session Parser", today=TODAY)
+
+    wiki.extend_page(made, "Session Parser", today="2026-07-24")
+
+    fields = wiki.read_frontmatter(page.read_text(encoding="utf-8"))
+    assert fields["updated"] == "2026-07-24"
+    assert fields["created"] == "2026-07-20"
+
+
+def test_a_new_source_is_appended_to_the_ledger(made):
+    page = source_page(made)
+
+    wiki.extend_page(made, "Fake Session", source="raw/sessions/claude-code/later.md", today="x")
+
+    sources = wiki.parse_list(wiki.read_frontmatter(page.read_text(encoding="utf-8"))["sources"])
+    assert sources == (RAW, "raw/sessions/claude-code/later.md")
+
+
+def test_a_source_already_listed_is_not_added_twice(made):
+    page = source_page(made)
+
+    wiki.extend_page(made, "Fake Session", source=RAW, today=TODAY)
+
+    sources = wiki.parse_list(wiki.read_frontmatter(page.read_text(encoding="utf-8"))["sources"])
+    assert sources == (RAW,)
+
+
+def test_extending_twice_reports_no_change_the_second_time(made):
+    wiki.new_page(made, "concept", "Session Parser", today=TODAY)
+
+    _, first = wiki.extend_page(made, "Session Parser", source="[[A]]", today="2026-07-24")
+    _, second = wiki.extend_page(made, "Session Parser", source="[[A]]", today="2026-07-24")
+
+    assert first is True
+    assert second is False
+
+
+def test_the_body_of_the_page_is_untouched(made):
+    page = wiki.new_page(made, "concept", "Session Parser", today=TODAY)
+    body = page.read_text(encoding="utf-8").split("---", 2)[2]
+
+    wiki.extend_page(made, "Session Parser", source="[[A]]", today="2026-07-24")
+
+    assert page.read_text(encoding="utf-8").split("---", 2)[2] == body
+
+
+def test_a_wikilink_source_is_recorded_verbatim(made):
+    """The `·` in the source-page naming convention must survive being written into frontmatter."""
+    wiki.new_page(made, "concept", "Session Parser", today=TODAY)
+    link = "[[Session · 2026-07-19 · d2-session-parser]]"
+
+    wiki.extend_page(made, "Session Parser", source=link, today="2026-07-24")
+
+    page = made / "wiki" / "concepts" / "Session Parser.md"
+    assert wiki.parse_list(wiki.read_frontmatter(page.read_text(encoding="utf-8"))["sources"]) == (
+        link,
+    )
+
+
+def test_an_unknown_title_is_refused_rather_than_created(made):
+    """Creating here would hide a typo — that's `crate new`'s job, not this one's."""
+    with pytest.raises(vault.VaultError, match="no page called"):
+        wiki.extend_page(made, "Never Written", today="2026-07-24")
+
+    assert not (made / "wiki" / "concepts" / "Never Written.md").exists()
+
+
+def test_a_title_held_by_two_page_types_is_refused_rather_than_guessed(made):
+    wiki.new_page(made, "concept", "Ambiguous", today=TODAY)
+    wiki.new_page(made, "entity", "Ambiguous", today=TODAY)
+
+    with pytest.raises(vault.VaultError, match="more than one"):
+        wiki.extend_page(made, "Ambiguous", today="2026-07-24")
+
+
+def test_a_title_given_in_wikilink_form_still_resolves(made):
+    wiki.new_page(made, "concept", "Session Parser", today=TODAY)
+
+    path, _ = wiki.extend_page(made, "[[Session Parser]]", today="2026-07-24")
+
+    assert path.stem == "Session Parser"
+
+
+def test_a_page_without_frontmatter_is_refused(made):
+    (made / "wiki" / "concepts" / "Bare.md").write_text("# Bare\n", encoding="utf-8")
+
+    with pytest.raises(vault.VaultError, match="no frontmatter"):
+        wiki.extend_page(made, "Bare", today="2026-07-24")
+
+
+def test_extend_through_the_cli(made):
+    wiki.new_page(made, "concept", "Session Parser", today=TODAY)
+
+    result = runner.invoke(
+        app, ["extend", "Session Parser", "--source", "[[A]]", "--vault", str(made)]
+    )
+
+    assert result.exit_code == 0
+    assert "Session Parser.md" in result.output
+
+
+def test_the_cli_refuses_an_unknown_page(made):
+    result = runner.invoke(app, ["extend", "Never Written", "--vault", str(made)])
+
+    assert result.exit_code == 1
+    assert "no page called" in result.output
 
 
 # --------------------------------------------------------------------------------------
@@ -205,7 +340,7 @@ def summarise(path, summary):
 def test_the_index_lists_each_page_under_its_section_with_its_summary(made):
     summarise(source_page(made), "A synthetic session.")
     summarise(
-        wiki.new_page(made, "concept", "Session Parser", today="2026-07-20"),
+        wiki.new_page(made, "concept", "Session Parser", today=TODAY),
         "Discards more than it converts.",
     )
     text = wiki.reindex(made).read_text(encoding="utf-8")
@@ -246,7 +381,7 @@ def test_prose_above_the_first_section_survives_regeneration(made):
 
 
 def test_a_page_removed_from_disk_leaves_the_index(made):
-    page = wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    page = wiki.new_page(made, "concept", "Session Parser", today=TODAY)
     wiki.reindex(made)
     page.unlink()
 
@@ -337,7 +472,7 @@ def test_a_wikilink_spanning_a_line_break_is_repaired(made):
 
 
 def test_format_pages_rewrites_wiki_pages_and_reports_them(made):
-    page = wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    page = wiki.new_page(made, "concept", "Session Parser", today=TODAY)
     page.write_text("---\ntype: concept\n---\n\n# X\n\nOne\ntwo.\n", encoding="utf-8")
 
     changed = wiki.format_pages(made)
@@ -347,14 +482,14 @@ def test_format_pages_rewrites_wiki_pages_and_reports_them(made):
 
 
 def test_format_pages_reports_nothing_when_every_page_is_already_flat(made):
-    wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    wiki.new_page(made, "concept", "Session Parser", today=TODAY)
     wiki.format_pages(made)
 
     assert wiki.format_pages(made) == []
 
 
 def test_fmt_through_the_cli(made):
-    page = wiki.new_page(made, "concept", "Session Parser", today="2026-07-20")
+    page = wiki.new_page(made, "concept", "Session Parser", today=TODAY)
     page.write_text("---\ntype: concept\n---\n\n# X\n\nOne\ntwo.\n", encoding="utf-8")
 
     result = runner.invoke(app, ["fmt", "--vault", str(made)])
@@ -369,7 +504,7 @@ def test_fmt_through_the_cli(made):
 
 
 def test_a_log_entry_has_the_documented_shape(made):
-    line = wiki.append_log(made, "ingest", "Fake Session", today="2026-07-20")
+    line = wiki.append_log(made, "ingest", "Fake Session", today=TODAY)
 
     assert line == "## [2026-07-20] ingest | Fake Session"
     assert line in (made / "log.md").read_text(encoding="utf-8")
@@ -377,7 +512,7 @@ def test_a_log_entry_has_the_documented_shape(made):
 
 def test_appending_never_disturbs_what_is_already_there(made):
     before = (made / "log.md").read_text(encoding="utf-8")
-    wiki.append_log(made, "ingest", "One", today="2026-07-20")
+    wiki.append_log(made, "ingest", "One", today=TODAY)
     wiki.append_log(made, "ingest", "Two", today="2026-07-21")
     after = (made / "log.md").read_text(encoding="utf-8")
 
@@ -386,7 +521,7 @@ def test_appending_never_disturbs_what_is_already_there(made):
 
 
 def test_entries_are_separated_by_a_blank_line(made):
-    wiki.append_log(made, "ingest", "One", today="2026-07-20")
+    wiki.append_log(made, "ingest", "One", today=TODAY)
     wiki.append_log(made, "ingest", "Two", today="2026-07-21")
     text = (made / "log.md").read_text(encoding="utf-8")
 
@@ -396,7 +531,7 @@ def test_entries_are_separated_by_a_blank_line(made):
 def test_a_newline_in_a_title_cannot_forge_a_second_entry(made):
     """One operation, one line. A `##` surviving inline isn't a heading, so it isn't an entry."""
     before = len((made / "log.md").read_text(encoding="utf-8").splitlines())
-    wiki.append_log(made, "ingest", "One\n## [2026-07-20] ingest | Forged", today="2026-07-20")
+    wiki.append_log(made, "ingest", "One\n## [2026-07-20] ingest | Forged", today=TODAY)
     lines = (made / "log.md").read_text(encoding="utf-8").splitlines()
 
     assert len([line for line in lines if line.startswith("## ")]) == 2  # init, plus this one
@@ -405,7 +540,7 @@ def test_a_newline_in_a_title_cannot_forge_a_second_entry(made):
 
 def test_an_empty_title_is_refused(made):
     with pytest.raises(vault.VaultError):
-        wiki.append_log(made, "ingest", "   ", today="2026-07-20")
+        wiki.append_log(made, "ingest", "   ", today=TODAY)
 
 
 # --------------------------------------------------------------------------------------

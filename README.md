@@ -113,6 +113,7 @@ Four things underneath it are mechanical, so they're commands rather than judgme
 ```bash
 crate pending --vault .                    # raw sources not yet in the wiki
 crate new concept "Session Parser" --vault .
+crate extend "Session Parser" --source "[[Session · 2026-07-19]]" --vault .   # bump updated:, add the source
 crate fmt --vault .                        # one line per paragraph, so Obsidian renders it right
 crate index --vault .                      # regenerate index.md from page frontmatter
 crate log ingest --title "Session Parser" --vault .

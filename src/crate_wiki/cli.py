@@ -250,6 +250,29 @@ def reindex(vault_path: VaultOption = Path(".")) -> None:
     typer.echo(f"Rewrote {path}")
 
 
+@app.command("extend")
+def extend_page(
+    title: Annotated[str, typer.Argument(help="The page to extend, by title.")],
+    vault_path: VaultOption = Path("."),
+    source: Annotated[
+        str | None,
+        typer.Option("--source", help="Source this page absorbed, e.g. '[[Session · …]]'."),
+    ] = None,
+) -> None:
+    """Record that an existing page absorbed new material: bump `updated:`, add to `sources:`.
+
+    `created:` is never touched, and a source already listed isn't added twice — so re-running
+    this is a no-op. On a source page `sources:` is the ingest ledger, which is why appending to
+    it is code rather than a hand edit.
+    """
+    try:
+        path, changed = wiki.extend_page(vault_path, title, source=source)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    typer.echo(f"{'Updated' if changed else 'Already current'} {path.name}")
+
+
 @app.command("fmt")
 def format_wiki(vault_path: VaultOption = Path(".")) -> None:
     """Put every wiki page's paragraphs back on one line each.
