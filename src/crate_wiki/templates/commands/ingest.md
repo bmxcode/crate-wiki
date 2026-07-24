@@ -10,7 +10,7 @@ This is the expensive operation — one source usually touches 10–15 pages tha
 
 That 10–15 is a count of pages *touched*, not created. In an early vault where little exists yet, the right answer is a handful of pages that each say something — not a dozen stubs written to hit a number.
 
-Read `CLAUDE.md` first if you haven't this session. `raw/` is immutable — you read it, never write it.
+Read `CLAUDE.md` and `CONVENTIONS.md` first if you haven't this session. `CONVENTIONS.md` is this vault's own rules — how it titles pages among them — and they apply here even though this file doesn't repeat them. `raw/` is immutable — you read it, never write it.
 
 ## Phase 1 — find and read the source
 
@@ -55,6 +55,8 @@ crate new source "<Title>" --vault . --raw raw/sessions/claude-code/<file>.md
 ```
 
 `--raw` is what makes re-running `/ingest` skip this source instead of duplicating it, so the source page's path has to be the real one.
+
+The title becomes the filename and the H1, so it's the thing to get right first. Follow `CONVENTIONS.md` wherever it says anything about titles — that's where a vault records how it names a kind of page, and this file deliberately doesn't, because vaults don't agree.
 
 **Don't write `wiki/daily/` or `wiki/syntheses/` here.** A daily page is one *day* across every source, which is `/daily`'s job, and a synthesis answers a question you asked, which is `/ask`'s. Writing either from a single source claims a scope you don't have and leaves those operations reconciling pages they didn't write. If a day or a question is worth a page, say so and I'll run the operation that owns it.
 

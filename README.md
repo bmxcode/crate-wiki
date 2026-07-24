@@ -20,7 +20,8 @@ Three layers:
 |---|---|---|
 | **Raw sources** | Sessions, clips, transcripts, pastes | You and the capture hook — immutable |
 | **The wiki** | Summaries, entities, concepts, syntheses | The LLM |
-| **The schema** | `CLAUDE.md` / `AGENTS.md` | You — it's what makes the LLM a knowledge manager rather than a chatbot |
+| **The schema** | `CLAUDE.md` / `AGENTS.md` | The engine — it's what makes the LLM a knowledge manager rather than a chatbot |
+| **Your conventions** | `CONVENTIONS.md` | You — what this particular vault has decided |
 
 Three operations: **ingest** a source, **ask** the wiki a question, **lint** it for contradictions and gaps.
 
@@ -66,7 +67,7 @@ Then scaffold a vault:
 crate init ~/crate-personal --scope personal
 ```
 
-The vault root is an Obsidian vault, so open it and the graph works for free. `CLAUDE.md` at its root is the schema — the file that makes an assistant maintain the wiki rather than just answer about it. Read it first; it's meant to be edited as it earns changes.
+The vault root is an Obsidian vault, so open it and the graph works for free. `CLAUDE.md` at its root is the schema — the file that makes an assistant maintain the wiki rather than just answer about it. Read it first, but don't edit it: it's the engine's, and `crate upgrade` replaces it. Anything this vault decides for itself goes in `CONVENTIONS.md` next to it, which the engine creates once and then never touches again ([ADR-0010](docs/adr/0010-conventions-file-and-upgrade-baseline.md)).
 
 `--scope work` is the same thing for client work: no journal, and a vault that refuses to push anywhere ([ADR-0001](docs/adr/0001-local-only-work-vault.md)).
 
@@ -126,14 +127,16 @@ Two consequences worth knowing:
 
 ## Upgrading a vault
 
-Most of the engine lives in the installed package, so `uv tool upgrade crate-wiki` is usually all there is to it. Two kinds of file are exceptions — slash commands and page templates have to sit inside the vault — so a release that changes those needs one command per vault:
+Most of the engine lives in the installed package, so `uv tool upgrade crate-wiki` is usually all there is to it. Some files have to sit inside the vault — the schema, slash commands, page templates — so a release that changes those needs one command per vault:
 
 ```bash
 uv tool upgrade crate-wiki
 crate upgrade ~/crate-personal
 ```
 
-It refreshes only what the engine owns: `.claude/commands/` and `.crate/templates/`. Everything you author — `CLAUDE.md`, `index.md`, `log.md`, `wiki/`, `raw/`, and your `config.toml` settings — is left alone. If your `CLAUDE.md` has drifted from the schema the current version ships, it says so and lets you decide; it never merges Layer 3 for you. `--dry-run` shows what would change. See [ADR-0009](docs/adr/0009-engine-owned-vault-files.md).
+It refreshes what the engine owns: `CLAUDE.md`, `AGENTS.md`, `.claude/commands/` and `.crate/templates/`. Everything you author — `CONVENTIONS.md`, `index.md`, `log.md`, `wiki/`, `raw/`, and your `config.toml` settings — is left alone. `--dry-run` shows what would change.
+
+Overwriting the schema is safe because the vault records a hash of what the engine last wrote it, in `.crate/baseline.json`. That's what separates "the template moved" from "you edited this" — a file you've changed is reported and left alone rather than clobbered, and so is one the engine has no record of writing. `crate upgrade --adopt` takes the shipped versions anyway, which is the one-time step for a vault created before that record existed. See [ADR-0010](docs/adr/0010-conventions-file-and-upgrade-baseline.md).
 
 ## Design
 

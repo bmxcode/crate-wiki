@@ -14,13 +14,22 @@ Read this file before touching anything.
 |---|---|---|---|
 | 1 · Raw sources | `raw/` | the capture hook, me | **read, never write** |
 | 2 · The wiki | `wiki/`, `index.md`, `log.md` | **you** | read + write |
-| 3 · This schema | `CLAUDE.md`, `AGENTS.md` | me | read, never write |
+| 3 · This schema | `CLAUDE.md`, `AGENTS.md` | the engine | read, never write |
+| 3 · This vault's conventions | `CONVENTIONS.md` | me | read, never write |
 
 **`raw/` is immutable.** It's ground truth, and never writing it is what makes a bad synthesis
 recoverable — I can always re-read the source and have you redo the page. Editing raw to match the
 wiki destroys the only copy of what actually happened.
 
-**You don't edit this file.** If the schema is wrong, say so and I'll change it.
+**Nobody edits this file — not you, and not me.** `crate upgrade` overwrites it with whatever the installed engine ships, so an edit here survives until the next release and no longer. If the schema is wrong, say so and I'll fix it in the engine, where the fix reaches every vault.
+
+## This vault's own conventions
+
+`CONVENTIONS.md`, next to this file, holds what *this* vault has decided — naming, structure, anything specific to it. **Read it now, with this file.** It's short, it's mine, and `crate upgrade` never touches it, which is exactly why local rules go there instead of here.
+
+It refines this file; it never overrides it. A convention names something this schema deliberately leaves open — how a particular kind of page is titled, say. If one appears to contradict a rule here, that's a bug in one of them: show me both rather than picking a side.
+
+It may be empty. That means this vault hasn't decided anything extra yet — a normal state, and not a gap for you to fill.
 
 ## Page types
 
