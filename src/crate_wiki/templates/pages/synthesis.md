@@ -6,7 +6,10 @@ updated: YYYY-MM-DD
 sources: ["[[Source Page Name]]"]
 ---
 
-# The question this answers
+# Title
+
+The question this answers, verbatim — and when I asked it. The title above is the claim; this is
+the question that produced it.
 
 ## Answer
 
