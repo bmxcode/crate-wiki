@@ -1,0 +1,19 @@
+# Scan staged changes for secrets before every commit — this repo goes public and its git
+# history is exposed retroactively, so one committed secret is permanent (see CLAUDE.md).
+#
+# This uses a local hook that calls the `gitleaks` binary on your PATH, rather than the
+# official remote hook: that one builds gitleaks from source with a Go toolchain, which this
+# project otherwise doesn't need. So the one prerequisite is the binary itself:
+#
+#     brew install gitleaks         # or see https://github.com/gitleaks/gitleaks
+#     pre-commit install            # wire this into .git/hooks (once per clone)
+#
+# CI scans history independently, so a contributor who skips this locally is still caught.
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (scan staged changes for secrets)
+        entry: gitleaks git --pre-commit --staged --redact --verbose
+        language: system
+        pass_filenames: false
