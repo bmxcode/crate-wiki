@@ -111,6 +111,7 @@ Mechanics have commands, and they cost nothing to run:
 |---|---|
 | `crate capture` | pull sessions into `raw/` |
 | `crate pending` | which raw sources aren't in the wiki yet |
+| `crate day [date]` | one day's session cards, oldest first — blank means yesterday |
 | `crate new <type> "<Title>"` | scaffold a page, frontmatter filled in |
 | `crate extend "<Title>"` | record that a page absorbed a source — `updated:` and `sources:` |
 | `crate fmt` | put every page's paragraphs back on one line each |
@@ -128,5 +129,8 @@ Ask me to add a command before you hand-roll a mechanical job.
   step isn't optional; without it you're a summarizer.
 - `/ask` — answer from the wiki. Read `index.md` first, then only the pages it points at. An answer
   worth keeping gets promoted to `wiki/syntheses/`, indexed, and logged.
+- `/daily` — write the account of a day from that day's session cards. Reads `raw/` directly, so it
+  works on a day nothing has been ingested from. **Tell me the day before writing it** — the cards
+  hold what happened and only I hold why. One page, in `wiki/daily/`, and never any other.
 - `/lint` — contradictions, stale claims, concepts referenced with no page.
 $scope_section

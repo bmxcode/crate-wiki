@@ -3,7 +3,7 @@ type: daily
 summary:
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
-sources: ["[[Source Page Name]]"]
+sources: ["raw/sessions/claude-code/example.md"]
 ---
 
 # YYYY-MM-DD

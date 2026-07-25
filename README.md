@@ -54,6 +54,8 @@ Three operations: **ingest** a source, **ask** the wiki a question, **lint** it 
 
 Then `/ask` queries the wiki, and answers worth keeping are promoted to `wiki/syntheses/` — so exploring compounds instead of evaporating into chat.
 
+And `/daily` answers the question this started from. It reads a day's session cards straight out of `raw/` — no ingest required — and writes `wiki/daily/2026-07-24.md`: an account of the day you can read in three months and have the day back.
+
 ## Install
 
 ```bash

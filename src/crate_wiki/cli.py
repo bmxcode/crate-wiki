@@ -141,7 +141,7 @@ def install_hook(
 
 
 # --------------------------------------------------------------------------------------
-# the mechanical half of /ingest — see ADR-0008
+# the mechanical half of the operations — see ADR-0008, and ADR-0012 for `day`
 # --------------------------------------------------------------------------------------
 
 
@@ -249,6 +249,34 @@ def pending(
         typer.echo(item.path if item.status == "new" else f"{item.path}\t{item.status}")
 
 
+@app.command()
+def day(
+    when: Annotated[
+        str | None,
+        typer.Argument(help="A date (YYYY-MM-DD), 'today', or 'yesterday'. Defaults to yesterday."),
+    ] = None,
+    vault_path: VaultOption = Path("."),
+) -> None:
+    """List one day's session cards, oldest first — the raw input `/daily` reads.
+
+    Prints the resolved date, then one card path per line. Order is by when each session
+    started, not by filename: a card is `<date>-<short id>.md`, so sorting names sorts by id.
+
+    The date is printed because it's the one thing the caller can't recover from the paths on a
+    day that has none — and resolving "yesterday" is a question about today's date, which is
+    what a model answers confidently and wrongly (ADR-0012).
+    """
+    try:
+        resolved = wiki.resolve_day(when)
+        cards = wiki.day_cards(vault_path, resolved)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    typer.echo(resolved)
+    for card in cards:
+        typer.echo(card)
+
+
 @app.command("new")
 def new_page(
     page_type: Annotated[str, typer.Argument(help="source, entity, concept, synthesis or daily.")],
@@ -331,7 +359,7 @@ def format_wiki(vault_path: VaultOption = Path(".")) -> None:
 
 @app.command("log")
 def log_entry(
-    operation: Annotated[str, typer.Argument(help="The operation: ingest, ask, lint.")],
+    operation: Annotated[str, typer.Argument(help="The operation: ingest, ask, daily, lint.")],
     title: Annotated[str, typer.Option("--title", help="What the entry is about.")],
     vault_path: VaultOption = Path("."),
 ) -> None:

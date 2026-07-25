@@ -47,6 +47,7 @@ def age(target):
     baseline[".crate/templates/concept.md"] = vault._digest(STALE)
     baseline.pop(".claude/commands/ingest.md", None)
     baseline.pop(".claude/commands/ask.md", None)
+    baseline.pop(".claude/commands/daily.md", None)
     vault.write_baseline(target, baseline, "0.0.1")
 
 
