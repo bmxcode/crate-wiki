@@ -1,6 +1,6 @@
 # ADR-0009 · The engine owns some files inside a vault, and `crate upgrade` refreshes them
 
-**Status:** accepted · 2026-07-20
+**Status:** accepted · 2026-07-20 · classification revised by [ADR-0010](0010-conventions-file-and-upgrade-baseline.md)
 
 ## Context
 
@@ -91,3 +91,25 @@ and unresolved; today it is documented rather than solved.
 engine-owned or authored *at the time it is added*, and added to the shared list rather than written
 directly by `create`. An unclassified file is one that `create` installs and `upgrade` never fixes,
 which is the exact bug this record exists to close.
+
+## Revised by ADR-0010
+
+One deliverable later, [ADR-0010](0010-conventions-file-and-upgrade-baseline.md) moves `CLAUDE.md`
+and `AGENTS.md` from **authored** to **engine-owned**, and adds a third class, **seeded**, for
+`CONVENTIONS.md`. The table above is superseded on those rows; everything else in this record stands.
+
+Two things above turned out to be wrong, and both are worth keeping visible rather than editing away.
+
+*"`CLAUDE.md` is reported, never merged"* assumed the report would mean something. It cannot: upgrade
+compares the vault against what the *current* version renders, with no record of what was actually
+installed, so an unedited vault that is merely old is indistinguishable from an edited one. Both real
+vaults were reported as drifted while neither had been touched. ADR-0010 adds that record — a
+committed hash baseline — which is what makes owning the file safe rather than reckless.
+
+The deeper error was treating `CLAUDE.md` as the user's *because it is important*. Nothing in it is
+actually vault-specific; it is the engine's own prose about how a crate vault works. What was
+genuinely local had no file at all, which is why ADR-0010 gives it one.
+
+The unresolved tension in **Bad** above — engine-owned files silently overwritten, so a customised
+`.crate/templates/` is lost — is closed by the same baseline, which notices the customisation and
+declines to overwrite it. That part of this record is documented *and* solved.

@@ -156,36 +156,73 @@ def upgrade(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would change and write nothing.")
     ] = False,
+    adopt: Annotated[
+        bool,
+        typer.Option(
+            "--adopt",
+            help="Take ownership of the engine-owned files even if they look edited locally.",
+        ),
+    ] = False,
 ) -> None:
-    """Refresh the engine-owned files in an existing vault: page templates and slash commands.
+    """Refresh the engine-owned files in an existing vault: the schema, page templates, commands.
 
-    Never touches what you author — CLAUDE.md, index.md, log.md, wiki/, raw/ (ADR-0009). A
-    CLAUDE.md that has drifted from the shipped schema is reported, never merged.
+    Never touches what you author — CONVENTIONS.md, index.md, log.md, wiki/, raw/. CLAUDE.md and
+    AGENTS.md are the engine's (ADR-0010), so they're refreshed like anything else, except when
+    they look locally edited: those are reported and left alone, and `--adopt` overrides that.
     """
     try:
-        report = vault.upgrade(vault_path, version=__version__, dry_run=dry_run)
+        report = vault.upgrade(vault_path, version=__version__, dry_run=dry_run, adopt=adopt)
     except vault.VaultError as error:
         raise _fail(error) from error
 
-    labels = ("would add", "would update") if report.dry_run else ("added", "updated")
+    labels = (
+        ("would add", "would update", "would create")
+        if report.dry_run
+        else ("added", "updated", "created")
+    )
     width = max(len(label) for label in labels)
-    for label, names in zip(labels, (report.created, report.updated), strict=True):
+    written = (report.created, report.updated, report.seeded)
+    for label, names in zip(labels, written, strict=True):
         for name in names:
             typer.echo(f"  {label.ljust(width)}  {name}")
 
-    if not report.created and not report.updated:
+    if not any(written) and not report.edited and not report.unclaimed:
         typer.echo("Already up to date.")
     elif report.dry_run:
         typer.echo("\nNothing was written (--dry-run).")
 
-    if report.schema_drifted:
-        typer.secho(
-            "\ncrate: this vault's CLAUDE.md differs from the schema this version ships.\n"
-            "crate: that file is yours, so it wasn't touched — diff it against the template\n"
-            "crate: if you want the newer wording.",
-            fg=typer.colors.YELLOW,
-            err=True,
+    if report.edited:
+        _left_alone(
+            report.edited,
+            "you've edited them since the engine wrote them",
+            vault_path,
         )
+    if report.unclaimed:
+        _left_alone(
+            report.unclaimed,
+            "the engine has no record of writing them, so it can't tell an edit\n"
+            "crate: from a copy left by a version that predates that record",
+            vault_path,
+        )
+
+
+def _left_alone(names: list[str], because: str, vault_path: Path) -> None:
+    """Report engine-owned files an upgrade declined to overwrite, and how to unblock them.
+
+    Says what to do rather than only what happened: the fix is always the same two steps, and a
+    warning that doesn't name them is one you can only act on by reading the source.
+    """
+    listed = "\n".join(f"crate:   {name}" for name in names)
+    typer.secho(
+        f"\ncrate: left alone, because {because}:\n"
+        f"{listed}\n"
+        "crate:\n"
+        "crate: anything this vault decided for itself belongs in CONVENTIONS.md, which an\n"
+        "crate: upgrade never touches. Move it there, then take the shipped versions with:\n"
+        f"crate:   crate upgrade {vault_path} --adopt",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
 
 
 @app.command()

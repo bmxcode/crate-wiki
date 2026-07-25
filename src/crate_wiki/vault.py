@@ -6,6 +6,8 @@ mechanics — see docs/adr/0004-deterministic-cli.md.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import stat
 import subprocess
 import tomllib
@@ -318,8 +320,6 @@ def create(path: Path, scope: str, *, version: str, today: str | None = None) ->
 
     vault.mkdir(parents=True, exist_ok=True)
 
-    _write(vault / "CLAUDE.md", _schema(scope, preset, vault.name))
-    _write(vault / "AGENTS.md", template_text("vault", "AGENTS.md"))
     _write(vault / "index.md", template_text("vault", "index.md"))
     _write(vault / "log.md", _render(template_text("vault", "log.md.tmpl"), today=today))
     _write(vault / ".gitignore", _gitignore(preset))
@@ -341,8 +341,17 @@ def create(path: Path, scope: str, *, version: str, today: str | None = None) ->
     )
     _write(vault / ".crate" / "state.json", "{}\n")
 
-    for source, destination in engine_files():
-        _write(vault.joinpath(*destination), template_text(*source))
+    baseline: dict[str, str] = {}
+    for destination, text in engine_files(scope, vault.name):
+        _write(vault.joinpath(*destination), text)
+        baseline["/".join(destination)] = _digest(text)
+
+    # Seeded files are deliberately absent from the baseline: it exists to decide whether
+    # overwriting is safe, and these are never overwritten.
+    for destination, text in seeded_files(vault.name):
+        _write(vault.joinpath(*destination), text)
+
+    write_baseline(vault, baseline, version)
 
     return _init_git(vault, preset)
 
@@ -352,78 +361,170 @@ def create(path: Path, scope: str, *, version: str, today: str | None = None) ->
 # --------------------------------------------------------------------------------------
 
 
-def engine_files() -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
-    """Files the engine owns inside a vault, as (shipped template, vault destination).
+def engine_files(scope: str, vault_name: str) -> list[tuple[tuple[str, ...], str]]:
+    """Files the engine owns inside a vault, as (destination, the exact text to write).
 
     `create` writes these and `upgrade` rewrites them, from one list so the two can't drift.
-    Everything else in a vault is authored — see ADR-0009. Slash commands have to be on disk
-    for Claude Code to find them, which is why they're copied rather than read from the package.
+    Content rather than a template name, because `CLAUDE.md` is rendered per vault and the
+    alternative is the same special case in both callers — see ADR-0010, which moved Layer 3's
+    schema onto this list. Slash commands have to be on disk for Claude Code to find them, which
+    is why they're copied rather than read from the package.
     """
-    pairs: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    preset = PRESETS[scope]
+    files: list[tuple[tuple[str, ...], str]] = [
+        (("CLAUDE.md",), _schema(scope, preset, vault_name)),
+        (("AGENTS.md",), template_text("vault", "AGENTS.md")),
+    ]
     for name in _template_names("pages"):
-        pairs.append((("pages", name), (".crate", "templates", name)))
+        files.append(((".crate", "templates", name), template_text("pages", name)))
     for name in _template_names("commands"):
-        pairs.append((("commands", name), (".claude", "commands", name)))
-    return pairs
+        files.append(((".claude", "commands", name), template_text("commands", name)))
+    return files
+
+
+def seeded_files(vault_name: str) -> list[tuple[tuple[str, ...], str]]:
+    """Files the engine creates once and then never writes again.
+
+    `CONVENTIONS.md` is where a vault records what it has decided for itself, so `upgrade`
+    installs it when it's missing and leaves it alone forever after. A third class rather than a
+    special case: ADR-0009 requires every file the engine ships to be classified when it's
+    added, and "installs once, then hands it over" is neither engine-owned nor authored.
+    """
+    conventions = _render(template_text("vault", "CONVENTIONS.md.tmpl"), vault_name=vault_name)
+    return [(("CONVENTIONS.md",), conventions.rstrip() + "\n")]
+
+
+def _digest(text: str) -> str:
+    """A content hash of what the engine wrote.
+
+    Content, not mtime: a `git checkout` rewrites every mtime in a vault, so a timestamp would
+    report a fresh clone as edited and nothing else would be wrong with it.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def read_baseline(vault: Path) -> dict[str, str]:
+    """What the engine last wrote into this vault, as `vault-relative path -> digest`.
+
+    Missing or unreadable means "no record" rather than an error. A vault created before the
+    baseline existed is the ordinary case, and a corrupt one has to degrade to the same careful
+    behaviour — refusing to overwrite — rather than raising somewhere it can't be handled.
+    """
+    try:
+        data = json.loads((vault / ".crate" / "baseline.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    return {str(name): str(digest) for name, digest in files.items()}
+
+
+def write_baseline(vault: Path, entries: dict[str, str], version: str) -> None:
+    """Record what the engine just wrote, so the next upgrade can tell edited from stale.
+
+    Committed, unlike `.crate/state.json`: this describes the vault's content, which every clone
+    shares, rather than this machine's capture cursor, which no two clones do. `crate_version` is
+    for whoever opens the file — no logic reads it, because keying behaviour off past releases
+    would make the engine a museum of its own versions.
+    """
+    payload = {"crate_version": version, "files": dict(sorted(entries.items()))}
+    _write(vault / ".crate" / "baseline.json", json.dumps(payload, indent=2) + "\n")
 
 
 @dataclass
 class UpgradeReport:
-    """What an upgrade did, or would do. `schema_drifted` is reported and never acted on."""
+    """What an upgrade did, or would do.
+
+    `edited` and `unclaimed` are both "left alone", kept apart because the reasons differ and so
+    do the fixes: one is a file you changed, the other is a file the engine has no record of
+    writing and therefore cannot judge.
+    """
 
     created: list[str]
     updated: list[str]
     unchanged: list[str]
-    schema_drifted: bool
+    seeded: list[str]
+    edited: list[str]
+    unclaimed: list[str]
     dry_run: bool
 
 
-def upgrade(path: Path, *, version: str, dry_run: bool = False) -> UpgradeReport:
+def upgrade(
+    path: Path, *, version: str, dry_run: bool = False, adopt: bool = False
+) -> UpgradeReport:
     """Refresh the engine-owned files in an existing vault. Returns what changed.
 
-    Authored files are never written: `CLAUDE.md`, `index.md`, `log.md`, `wiki/` and `raw/` are
-    yours. `CLAUDE.md` is the interesting one — the engine ships its template, so a shipped
-    change can't reach a vault whose schema you've since edited. Upgrade reports that drift and
-    stops there rather than merging, because Layer 3 is the highest-leverage file in a vault and
-    a bad automatic merge to it is worse than a manual edit you chose to make.
+    Engine-owned now includes `CLAUDE.md` and `AGENTS.md` (ADR-0010): the schema holds nothing
+    vault-local since `CONVENTIONS.md` exists to hold it, so it can be overwritten like any other
+    shipped file. What makes that safe is the baseline — a record of what the engine last wrote,
+    which is the only way to tell "you edited this" from "the template moved". Without one, a
+    file that differs from what this version ships is left alone rather than guessed at.
+
+    `adopt` says the engine-owned files are unedited whatever they look like: overwrite and
+    re-record. That is the one-time migration for a vault created before the baseline existed,
+    and the way back for anyone who customised a page template and wants the shipped one.
+
+    Authored files are never written: `index.md`, `log.md`, `wiki/` and `raw/` are yours, and so
+    is `CONVENTIONS.md` from the moment it exists.
     """
     vault = path.expanduser().resolve()
     config = load_config(vault)  # raises VaultError when it isn't a vault
+    scope = str(config.get("scope", ""))
+    if scope not in PRESETS:
+        raise VaultError(f"{vault} has an unknown scope {scope!r} — can't tell what it should ship")
 
-    report = UpgradeReport([], [], [], schema_drifted=False, dry_run=dry_run)
+    report = UpgradeReport([], [], [], [], [], [], dry_run=dry_run)
 
-    for source, destination in engine_files():
+    # Seeded first, so a vault about to be told its CLAUDE.md was left alone already has the
+    # file those local rules are supposed to move into.
+    for destination, text in seeded_files(vault.name):
         target = vault.joinpath(*destination)
-        shipped = template_text(*source)
+        if target.exists():
+            continue
+        report.seeded.append("/".join(destination))
+        if not dry_run:
+            _write(target, text)
+
+    baseline = read_baseline(vault)
+    recorded: dict[str, str] = {}  # rebuilt, so a file the engine stopped shipping drops out
+
+    for destination, shipped in engine_files(scope, vault.name):
+        target = vault.joinpath(*destination)
         relative = "/".join(destination)
 
-        if not target.exists():
-            report.created.append(relative)
-        elif target.read_text(encoding="utf-8") == shipped:
-            report.unchanged.append(relative)
-            continue
-        else:
-            report.updated.append(relative)
+        if target.exists():
+            current = target.read_text(encoding="utf-8")
+            if current == shipped:
+                # Also the vault someone edited into agreement with what this version ships.
+                report.unchanged.append(relative)
+                recorded[relative] = _digest(shipped)
+                continue
 
+            was = baseline.get(relative)
+            if was is None and not adopt:
+                # No record of writing this, so an edit and a copy left by a version that
+                # predates the baseline look identical. Refusing is the recoverable half.
+                report.unclaimed.append(relative)
+                continue
+            if was is not None and was != _digest(current) and not adopt:
+                report.edited.append(relative)
+                recorded[relative] = was  # still the last thing the engine wrote
+                continue
+
+            report.updated.append(relative)
+        else:
+            report.created.append(relative)
+
+        recorded[relative] = _digest(shipped)
         if not dry_run:
             _write(target, shipped)
 
-    report.schema_drifted = _schema_drifted(vault, config)
-
     if not dry_run:
+        write_baseline(vault, recorded, version)
         _bump_version(vault, version)
 
     return report
-
-
-def _schema_drifted(vault: Path, config: dict) -> bool:
-    """Whether the vault's CLAUDE.md differs from what this engine version would ship."""
-    scope = str(config.get("scope", ""))
-    preset = PRESETS.get(scope)
-    schema = vault / "CLAUDE.md"
-    if preset is None or not schema.is_file():
-        return False
-    return schema.read_text(encoding="utf-8") != _schema(scope, preset, vault.name)
 
 
 def _bump_version(vault: Path, version: str) -> None:
