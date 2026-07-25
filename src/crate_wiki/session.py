@@ -14,6 +14,7 @@ session; D7 (Codex) reuses the card model with a different front-end.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -350,6 +351,27 @@ def parse(session: Path, *, crate_version: str) -> Card | None:
 # --------------------------------------------------------------------------------------
 
 
+# A reproduced prose paragraph can carry an inline markdown link the model wrote — often a
+# relative path to a code file it touched. Obsidian resolves such a target vault-locally, and
+# since no note matches, clicking the Graph-view node *creates* a blank `<path>.md` phantom. A
+# card describes another repo, so a vault-relative target never resolves by construction; render
+# it as an inert code span. Real URLs (they open a browser, not a vault node) are left clickable.
+_MD_LINK = re.compile(r"!?\[([^\]]+)\]\(([^)]+)\)")
+_URL_TARGET = re.compile(r"^\s*<?\s*(?:[a-z][a-z0-9+.\-]*://|mailto:|//|www\.|#)", re.IGNORECASE)
+
+
+def _inert_local_links(text: str) -> str:
+    """Turn markdown links with local (non-URL) targets into `code spans`, leaving URLs alone."""
+
+    def replace(match: re.Match[str]) -> str:
+        label, target = match.group(1), match.group(2)
+        if _URL_TARGET.match(target):
+            return match.group(0)
+        return f"`{label}`"
+
+    return _MD_LINK.sub(replace, text)
+
+
 def _render_card(card: Card) -> str:
     files = ", ".join(card.files)
     lines = [
@@ -375,7 +397,7 @@ def _render_card(card: Card) -> str:
         lines.append("")
         stamp = f" · {turn.time}" if turn.time else ""
         if turn.role == "user":
-            prompt = turn.items[0] if turn.items else ""
+            prompt = _inert_local_links(turn.items[0]) if turn.items else ""
             lines.append(f"**user**{stamp}")
             lines += [f"> {line}" for line in prompt.splitlines()] or ["> "]
         else:
@@ -389,7 +411,7 @@ def _render_assistant(turn: Turn, cwd: str) -> list[str]:
     items = turn.items
     start = 0
     if items and isinstance(items[0], str):
-        lines = [f"**assistant** — {items[0]}"]  # lead with the first prose, inline
+        lines = [f"**assistant** — {_inert_local_links(items[0])}"]  # lead with first prose, inline
         start = 1
     else:
         lines = ["**assistant**"]
@@ -397,7 +419,8 @@ def _render_assistant(turn: Turn, cwd: str) -> list[str]:
         if isinstance(item, Action):
             lines.append(_render_action(item, cwd))
         else:
-            lines += ["", item]  # a later prose paragraph, set off by a blank line
+            # a later prose paragraph, set off by a blank line
+            lines += ["", _inert_local_links(item)]
     return lines
 
 
