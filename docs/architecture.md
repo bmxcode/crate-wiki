@@ -98,7 +98,7 @@ wiki/                # Layer 2 — LLM-maintained
   baseline.json      #   hashes of what the engine last wrote — committed, travels with the vault
   templates/         #   one page skeleton per type, carrying the exact frontmatter
 .claude/
-  commands/          #   the operations — /ingest, /ask, /lint
+  commands/          #   the operations — /ingest, /ask, /daily, /lint
 ```
 
 Every file the engine puts in a vault falls in one of three classes, decided when the file is added. **Engine-owned** — `CLAUDE.md`, `AGENTS.md`, `.crate/templates/`, `.claude/commands/` — is installed by `crate init` and refreshed by `crate upgrade`. **Seeded** is `CONVENTIONS.md`: created once when it's missing, never written again. Everything else is **authored** and the engine writes it at most once. Slash commands have to be on disk for Claude Code to find them, which is what makes a vault not quite pure content — see [ADR-0009](adr/0009-engine-owned-vault-files.md).
@@ -109,7 +109,7 @@ Refreshing the schema is only safe because `.crate/baseline.json` records a hash
 
 ## Inside an operation
 
-`/ingest`, `/ask` and `/lint` are slash commands, not CLI subcommands — their purpose is judgment.
+`/ingest`, `/ask`, `/daily` and `/lint` are slash commands, not CLI subcommands — their purpose is judgment.
 But each is a *sequence*, and the steps alternate. Folding a source into the wiki means working out
 what mattered (judgment) and also working out which raw files aren't in the wiki yet (one right
 answer), writing prose (judgment) and also appending a fixed-format log line (one right answer).
@@ -135,6 +135,15 @@ silently dropped from it. And "already ingested" is derived too: it's the union 
 
 The step in the middle is the one that isn't automatable at all. `/ingest` presents its takeaways and
 a page plan and then stops, before writing anything. Without that it's a summarizer.
+
+Every operation since has been built the same way, and the primitives turned out to be
+operation-agnostic on purpose: `/ask` reuses all of them and adds no command of its own
+([ADR-0011](adr/0011-ask-and-the-promoted-synthesis.md)). `/daily` is the one that earned surface —
+`crate day` — because "which session cards belong to yesterday" is a question the existing commands
+can't answer: `crate pending` is keyed on ingest state rather than a date, and it *hides* an
+ingested card, which a day's account still has to read. The rule an operation is held to is the same
+either way ([ADR-0012](adr/0012-daily-reads-raw-and-earns-a-command.md)): a command for a mechanical
+step with no home, and nothing for a step the model should be doing.
 
 ## The session parser
 

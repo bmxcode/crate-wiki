@@ -1,8 +1,9 @@
-"""Mechanics over an existing vault: what's unread, scaffolding a page, the index, the log.
+"""Mechanics over an existing vault: what's unread, a day's cards, scaffolding, the index, the log.
 
-These are the four steps of `/ingest` that have a single right answer, so they're code rather
-than prompt — see docs/adr/0008-code-and-prompt-inside-an-operation.md. The steps between them
-(what mattered, which page a fact belongs on, the prose) stay with the model.
+These are the steps of `/ingest` and `/daily` that have a single right answer, so they're code
+rather than prompt — see docs/adr/0008-code-and-prompt-inside-an-operation.md and
+docs/adr/0012-daily-reads-raw-and-earns-a-command.md. The steps between them (what mattered,
+which page a fact belongs on, what a day was about, the prose) stay with the model.
 
 Two properties everything here holds to:
 
@@ -17,7 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from crate_wiki.vault import PAGE_TYPES, WIKI_DIRS, VaultError, load_config, template_text
@@ -221,6 +222,95 @@ def _is_stale(raw: Path, page: Page) -> bool:
     except (OSError, ValueError, OverflowError):
         return False
     return touched > page.updated
+
+
+# --------------------------------------------------------------------------------------
+# a day's session cards — the mechanical half of `/daily`, see ADR-0012
+# --------------------------------------------------------------------------------------
+#
+# `crate pending` can't answer this: it's keyed on ingest state rather than on a date, and it
+# hides an already-ingested card — which a day's account still has to read, because whether a
+# session was folded into the wiki has nothing to do with whether it happened that day.
+
+# The raw section a day is made of. A day is its *sessions*: clips, pastes and YouTube carry no
+# reliable date of their own, and they reach the wiki through `/ingest`.
+SESSION_SECTION = "sessions"
+
+# What `crate day` accepts besides a literal date, as days back from today.
+RELATIVE_DAYS = {"today": 0, "yesterday": 1}
+
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+# A card is named `<date>-<short session id>.md` by the capture layer.
+_CARD_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})-")
+
+
+def resolve_day(expression: str | None = None, *, today: str | None = None) -> str:
+    """A date expression as `YYYY-MM-DD`. Blank or `yesterday` is yesterday; `today` is today.
+
+    This is code and not a line in a prompt for the reason ADR-0008 gives: a model doesn't
+    reliably know today's date, and a page titled for the wrong day looks exactly like one
+    titled for the right day. Going through `date.today()` also means the test clock reaches it.
+    """
+    word = (expression or "yesterday").strip().lower()
+    base = date.fromisoformat(today) if today else date.today()
+
+    if word in RELATIVE_DAYS:
+        return (base - timedelta(days=RELATIVE_DAYS[word])).isoformat()
+    try:
+        return date.fromisoformat(word).isoformat()
+    except ValueError as error:
+        raise VaultError(
+            f"can't read {expression!r} as a day — give YYYY-MM-DD, 'today', or 'yesterday'"
+        ) from error
+
+
+def day_cards(vault: Path, day: str) -> list[str]:
+    """The session cards belonging to `day`, oldest first, vault-relative and posix.
+
+    Oldest first is the point: a day reads as an account only in the order it happened, and the
+    filename can't give that — a card is `<date>-<short id>.md`, so sorting names sorts by
+    session id. The order lives in `started:`, which is why this is code.
+
+    Every session front-end is included (`raw/sessions/*/`), so a Codex card sits in the same day
+    as a Claude Code one. A private `sessions` section yields nothing at all, the way `pending`
+    excludes private sections rather than erroring — ADR-0006 is a rule about what may reach
+    `wiki/`, and a daily page is `wiki/`.
+    """
+    if SESSION_SECTION not in _public_sections(vault):
+        return []
+
+    dated: list[tuple[str, str]] = []
+    for relative in _raw_files(vault, [SESSION_SECTION]):
+        if not relative.endswith(".md"):
+            continue
+        started = _card_started(vault / relative, relative)
+        if started[:10] == day:
+            dated.append((started, relative))
+
+    return [relative for _, relative in sorted(dated)]
+
+
+def _card_started(path: Path, relative: str) -> str:
+    """When a card's session started: its `started:` frontmatter, else its filename's date.
+
+    The filename is minted from `started:` when the card is captured, so the two agree by
+    construction — the fallback is for a card whose frontmatter is missing or unreadable, which
+    still plainly belongs to the day in its name. A file that carries neither belongs to no day
+    and is left out of all of them, which is the honest answer for something that isn't a card.
+
+    Never mtime. A `git checkout` rewrites every mtime in a vault (the same reason ADR-0010
+    hashes content), and a resumed session rewrites its card days after the day it records.
+    """
+    try:
+        started = read_frontmatter(path.read_text(encoding="utf-8")).get("started", "")
+    except OSError:
+        started = ""
+    if _ISO_DAY.match(started):
+        return started
+
+    match = _CARD_DATE.match(Path(relative).name)
+    return match.group(1) if match else ""
 
 
 # --------------------------------------------------------------------------------------

@@ -1,10 +1,10 @@
-"""Tests for the mechanical half of `/ingest`: pending, new, index, log.
+"""Tests for the mechanical half of the operations: pending, day, new, extend, index, fmt, log.
 
 Fixtures are synthetic and built in tmp_path — no real vault content reaches this repo.
 """
 
 import os
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from typer.testing import CliRunner
@@ -376,6 +376,157 @@ def test_the_index_lists_a_synthesis_under_its_own_section(made):
 
 
 # --------------------------------------------------------------------------------------
+# day — which session cards belong to a date, and in what order (ADR-0012)
+# --------------------------------------------------------------------------------------
+
+
+def card(target, name, started=None, front_end="claude-code"):
+    """A synthetic session card: the frontmatter `crate day` reads, and nothing else.
+
+    `started=None` writes a card with no `started:` field, which is the shape `day_cards` has to
+    fall back on the filename for.
+    """
+    path = target / "raw" / "sessions" / front_end / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = f"started: {started}\n" if started else ""
+    path.write_text(f"---\nsource: claude-code\n{stamp}---\n\n# branch\n", encoding="utf-8")
+    return path
+
+
+def test_a_day_holds_the_cards_that_started_on_it_and_no_others(made):
+    card(made, "2026-07-21-11111111.md", "2026-07-21T09:00:00Z")
+    card(made, "2026-07-22-22222222.md", "2026-07-22T09:00:00Z")
+
+    assert wiki.day_cards(made, "2026-07-21") == ["raw/sessions/claude-code/2026-07-21-11111111.md"]
+
+
+def test_a_day_is_ordered_by_when_each_session_started_not_by_filename(made):
+    """The reason this is code: a card is `<date>-<short id>.md`, so names sort by session id."""
+    card(made, "2026-07-21-aaaaaaaa.md", "2026-07-21T16:00:00Z")
+    card(made, "2026-07-21-bbbbbbbb.md", "2026-07-21T09:00:00Z")
+
+    assert wiki.day_cards(made, "2026-07-21") == [
+        "raw/sessions/claude-code/2026-07-21-bbbbbbbb.md",
+        "raw/sessions/claude-code/2026-07-21-aaaaaaaa.md",
+    ]
+
+
+def test_a_card_without_a_started_field_still_belongs_to_the_day_in_its_name(made):
+    """The `made` fixture's card carries no `started:` — it must not vanish from its own day."""
+    assert wiki.day_cards(made, TODAY) == [RAW]
+
+
+def test_a_day_spans_every_session_front_end(made):
+    """A Codex card (D7) sits in the same day as a Claude Code one, with no change here."""
+    card(made, "2026-07-21-cccccccc.md", "2026-07-21T10:00:00Z", front_end="codex")
+    card(made, "2026-07-21-dddddddd.md", "2026-07-21T08:00:00Z")
+
+    assert wiki.day_cards(made, "2026-07-21") == [
+        "raw/sessions/claude-code/2026-07-21-dddddddd.md",
+        "raw/sessions/codex/2026-07-21-cccccccc.md",
+    ]
+
+
+def test_a_days_cards_do_not_depend_on_mtime(made):
+    """A `git checkout` rewrites every mtime, and a resumed session rewrites its card later."""
+    touch(card(made, "2026-07-21-eeeeeeee.md", "2026-07-21T09:00:00Z"), "2026-07-29")
+
+    assert wiki.day_cards(made, "2026-07-21") == ["raw/sessions/claude-code/2026-07-21-eeeeeeee.md"]
+    assert wiki.day_cards(made, "2026-07-29") == []
+
+
+def test_an_undated_file_under_sessions_belongs_to_no_day(made):
+    card(made, "README.md")
+
+    assert wiki.day_cards(made, TODAY) == [RAW]
+
+
+def test_a_private_sessions_section_yields_no_cards(made):
+    """ADR-0006: private sections are context only, and a daily page is `wiki/`."""
+    config = made / ".crate" / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'name = "sessions"\nprivate = false', 'name = "sessions"\nprivate = true'
+        ),
+        encoding="utf-8",
+    )
+
+    assert wiki.day_cards(made, TODAY) == []
+
+
+def test_an_already_ingested_card_still_belongs_to_its_day(made):
+    """Why `crate pending` can't answer this: it hides ingested sources, and a day can't."""
+    source_page(made)
+    wiki.extend_page(made, "Fake Session", source=RAW, today=TODAY)
+
+    assert [item.path for item in wiki.pending(made)] == []
+    assert wiki.day_cards(made, TODAY) == [RAW]
+
+
+def test_a_day_with_nothing_in_it_is_empty_rather_than_an_error(made):
+    assert wiki.day_cards(made, "2026-01-01") == []
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        (None, "2026-07-19"),
+        ("", "2026-07-19"),
+        ("yesterday", "2026-07-19"),
+        ("Yesterday", "2026-07-19"),
+        ("today", "2026-07-20"),
+        ("2026-03-04", "2026-03-04"),
+    ],
+)
+def test_a_day_expression_resolves_to_one_date(expression, expected):
+    assert wiki.resolve_day(expression, today=TODAY) == expected
+
+
+def test_a_blank_day_is_yesterday_by_the_clock_the_engine_reads():
+    """Asserted against `date.today()`, never a literal — so CRATE_TEST_CLOCK passes too."""
+    assert wiki.resolve_day() == (date.today() - timedelta(days=1)).isoformat()
+
+
+def test_a_day_that_isnt_a_date_says_what_it_accepts():
+    with pytest.raises(vault.VaultError, match="YYYY-MM-DD"):
+        wiki.resolve_day("last tuesday")
+
+
+# --------------------------------------------------------------------------------------
+# daily — the page mechanics /daily reuses, and the ledger it must not touch (ADR-0012)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_daily_page_is_titled_by_the_day_it_covers(made):
+    """The title is the day; `created:` is when the page was written, which is another day."""
+    path = wiki.new_page(made, "daily", "2026-07-19", today=TODAY)
+    fields = wiki.read_frontmatter(path.read_text(encoding="utf-8"))
+
+    assert path == made / "wiki" / "daily" / "2026-07-19.md"
+    assert "# 2026-07-19" in path.read_text(encoding="utf-8")
+    assert fields["created"] == TODAY
+
+
+def test_a_daily_page_records_the_raw_cards_it_was_written_from(made):
+    """`sources:` on a daily page is raw paths — what it was built from, in the layer it read."""
+    wiki.new_page(made, "daily", "2026-07-20", today=TODAY)
+    wiki.extend_page(made, "2026-07-20", source=RAW, today=TODAY)
+
+    page = made / "wiki" / "daily" / "2026-07-20.md"
+    sources = wiki.parse_list(wiki.read_frontmatter(page.read_text(encoding="utf-8"))["sources"])
+    assert sources == (RAW,)
+
+
+def test_a_daily_page_citing_a_card_never_makes_it_look_ingested(made):
+    """The ledger reads only wiki/sources/, so a daily page can cite raw without claiming it."""
+    wiki.new_page(made, "daily", "2026-07-20", today=TODAY)
+    wiki.extend_page(made, "2026-07-20", source=RAW, today=TODAY)
+
+    assert wiki.ingested(made) == {}
+    assert [item.path for item in wiki.pending(made)] == [RAW]
+
+
+# --------------------------------------------------------------------------------------
 # index — derived, never authored
 # --------------------------------------------------------------------------------------
 
@@ -630,6 +781,34 @@ def test_new_prints_the_path_it_wrote(made):
 
     assert result.exit_code == 0
     assert result.output.strip().endswith("Session Parser.md")
+
+
+def test_day_prints_the_resolved_date_then_the_cards(made):
+    card(made, "2026-07-21-aaaaaaaa.md", "2026-07-21T16:00:00Z")
+    card(made, "2026-07-21-bbbbbbbb.md", "2026-07-21T09:00:00Z")
+    result = runner.invoke(app, ["day", "2026-07-21", "--vault", str(made)])
+
+    assert result.exit_code == 0
+    assert result.output.splitlines() == [
+        "2026-07-21",
+        "raw/sessions/claude-code/2026-07-21-bbbbbbbb.md",
+        "raw/sessions/claude-code/2026-07-21-aaaaaaaa.md",
+    ]
+
+
+def test_day_still_prints_the_date_when_nothing_happened(made):
+    """The date is the one thing the caller can't read off the paths when there are none."""
+    result = runner.invoke(app, ["day", "2026-01-01", "--vault", str(made)])
+
+    assert result.exit_code == 0
+    assert result.output.splitlines() == ["2026-01-01"]
+
+
+def test_day_reports_an_unreadable_date_rather_than_guessing(made):
+    result = runner.invoke(app, ["day", "last tuesday", "--vault", str(made)])
+
+    assert result.exit_code == 1
+    assert "YYYY-MM-DD" in result.output
 
 
 def test_log_through_the_cli_appends_one_entry(made):
