@@ -54,3 +54,24 @@ jobs:
           "$HOME/.local/bin/crate" init /tmp/ci-vault --scope personal
           test -f /tmp/ci-vault/CLAUDE.md
           test -f /tmp/ci-vault/.crate/templates/concept.md
+
+  # Secret scanning, kept a separate job so it's its own required check and so a contributor who
+  # skips the local pre-commit hook (.pre-commit-config.yaml) is still caught here. Same gitleaks
+  # the hook runs, pinned to the same version — but over the whole history rather than staged
+  # changes, which is what matters for a repo whose history is exposed retroactively on going public.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks walks commit history, so it needs all of it — the default shallow checkout
+          # would leave everything but the tip commit unscanned.
+          fetch-depth: 0
+
+      - name: Scan history for secrets
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks git --redact --verbose
