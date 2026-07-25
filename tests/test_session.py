@@ -168,6 +168,33 @@ def test_prose_and_actions_render_in_document_order(tmp_path):
     assert order == sorted(order), "prose and actions must stay interleaved in order"
 
 
+def test_local_path_markdown_links_render_as_inert_code_spans(tmp_path):
+    # A reproduced markdown link to a relative path is a live node in Obsidian's Graph view;
+    # clicking it materializes a blank <path>.md phantom in the vault. Real URLs must survive.
+    records = [
+        rec("u1", None, "user", "See [tests/test_session.py](tests/test_session.py)."),
+        rec(
+            "a1",
+            "u1",
+            "assistant",
+            [
+                {"type": "text", "text": "Landed [session.py](src/crate_wiki/session.py) today."},
+                {"type": "text", "text": "Rationale in [the ADR](https://example.com/adr)."},
+            ],
+        ),
+    ]
+    body = parse(tmp_path, records).render()
+
+    # Every local-target link — in the prompt and the assistant paragraph — is neutralized to a
+    # code span of its label, and no clickable local target survives.
+    assert "`tests/test_session.py`" in body
+    assert "`session.py`" in body
+    assert "](tests/test_session.py)" not in body
+    assert "](src/crate_wiki/session.py)" not in body
+    # A genuine URL link stays clickable.
+    assert "[the ADR](https://example.com/adr)" in body
+
+
 def test_harness_injected_user_records_never_pose_as_prompts(tmp_path):
     # A task notification carries no distinguishing field — same shape as a real prompt — so
     # the wrapper text is the only signal that it wasn't typed by a human.
