@@ -46,6 +46,7 @@ def age(target):
     baseline = vault.read_baseline(target)
     baseline[".crate/templates/concept.md"] = vault._digest(STALE)
     baseline.pop(".claude/commands/ingest.md", None)
+    baseline.pop(".claude/commands/ask.md", None)
     vault.write_baseline(target, baseline, "0.0.1")
 
 
@@ -70,6 +71,7 @@ def shipped(target, relative):
 
 def test_init_installs_the_slash_commands(made):
     assert (made / ".claude" / "commands" / "ingest.md").is_file()
+    assert (made / ".claude" / "commands" / "ask.md").is_file()
 
 
 def test_every_engine_file_lands_where_create_and_upgrade_agree_it_should(made):

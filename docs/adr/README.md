@@ -13,6 +13,7 @@ One record per decision where a real alternative was rejected. If there was no a
 | [0008](0008-code-and-prompt-inside-an-operation.md) | The code/prompt boundary runs *inside* an operation, not around it | ADR-0004 read at the component level puts all of `/ingest` in a prompt |
 | [0009](0009-engine-owned-vault-files.md) | The engine owns some files inside a vault, and `crate upgrade` refreshes them | A vault turns out not to be purely content — classification revised by 0010 |
 | [0010](0010-conventions-file-and-upgrade-baseline.md) | Layer 3 splits, and `crate upgrade` keeps a baseline of what it wrote | Reverses 0009 on `CLAUDE.md` one deliverable later |
+| [0011](0011-ask-and-the-promoted-synthesis.md) | `/ask` promotes an answer to a page, and adds no CLI to do it | ADR-0008 mandates the record; "no new subcommand" needs a defence |
 
 0007 is deliberately unused: every work vault's `config.toml` reserves it for the record that would
 have to be written to reopen [ADR-0001](0001-local-only-work-vault.md) and give that vault a remote.

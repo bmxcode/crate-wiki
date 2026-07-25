@@ -180,8 +180,9 @@ def test_scaffolding_never_overwrites_an_existing_page(made):
         wiki.new_page(made, "concept", "Session Parser", today=TODAY)
 
 
-@pytest.mark.parametrize("title", ["a/b", "../escape", "a[b]", "a|b", "a#b", ""])
+@pytest.mark.parametrize("title", ["a/b", "../escape", "a[b]", "a|b", "a#b", "a?b", "a:b", ""])
 def test_titles_that_would_break_a_filename_or_a_wikilink_are_refused(made, title):
+    """`?` and `:` among them: a synthesis title can't be a question, so /ask uses a claim."""
     with pytest.raises(vault.VaultError):
         wiki.new_page(made, "concept", title, today=TODAY)
 
@@ -325,6 +326,53 @@ def test_the_cli_refuses_an_unknown_page(made):
 
     assert result.exit_code == 1
     assert "no page called" in result.output
+
+
+# --------------------------------------------------------------------------------------
+# synthesis — the mechanics /ask reuses, and the guarantees it leans on (ADR-0011)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_synthesis_scaffolds_with_the_title_as_h1_and_an_empty_ledger(made):
+    """/ask adds no code: `crate new synthesis` scaffolds the page like any other type."""
+    path = wiki.new_page(made, "synthesis", "Capture stays free by running on a hook", today=TODAY)
+    text = path.read_text(encoding="utf-8")
+
+    assert path == made / "wiki" / "syntheses" / "Capture stays free by running on a hook.md"
+    assert "# Capture stays free by running on a hook" in text
+    assert wiki.parse_list(wiki.read_frontmatter(text)["sources"]) == ()
+
+
+def test_a_synthesis_records_the_wiki_pages_it_drew_from(made):
+    """A synthesis's `sources:` is provenance too — wiki pages, recorded by the same `extend`."""
+    wiki.new_page(made, "synthesis", "Capture stays free", today=TODAY)
+
+    wiki.extend_page(made, "Capture stays free", source="[[Session Parser]]", today=TODAY)
+    wiki.extend_page(made, "Capture stays free", source="[[Stop Hook]]", today=TODAY)
+
+    page = made / "wiki" / "syntheses" / "Capture stays free.md"
+    sources = wiki.parse_list(wiki.read_frontmatter(page.read_text(encoding="utf-8"))["sources"])
+    assert sources == ("[[Session Parser]]", "[[Stop Hook]]")
+
+
+def test_a_synthesis_source_never_makes_a_raw_file_look_ingested(made):
+    """The ledger reads only wiki/sources/, so a synthesis citing pages can't shadow a raw file."""
+    wiki.new_page(made, "synthesis", "Capture stays free", today=TODAY)
+    wiki.extend_page(made, "Capture stays free", source="[[Session Parser]]", today=TODAY)
+
+    assert [item.path for item in wiki.pending(made)] == [RAW]
+    assert wiki.ingested(made) == {}
+
+
+def test_the_index_lists_a_synthesis_under_its_own_section(made):
+    summarise(
+        wiki.new_page(made, "synthesis", "Capture stays free", today=TODAY),
+        "Runs on a hook, so it costs no tokens.",
+    )
+    text = wiki.reindex(made).read_text(encoding="utf-8")
+
+    entry = "- [[Capture stays free]] — Runs on a hook, so it costs no tokens."
+    assert f"## Syntheses\n\n{entry}" in text
 
 
 # --------------------------------------------------------------------------------------
@@ -508,6 +556,13 @@ def test_a_log_entry_has_the_documented_shape(made):
 
     assert line == "## [2026-07-20] ingest | Fake Session"
     assert line in (made / "log.md").read_text(encoding="utf-8")
+
+
+def test_an_ask_entry_reads_as_an_ask(made):
+    """The operation is a free-form column, so /ask logs with `ask` and no new code."""
+    line = wiki.append_log(made, "ask", "Capture stays free", today=TODAY)
+
+    assert line == "## [2026-07-20] ask | Capture stays free"
 
 
 def test_appending_never_disturbs_what_is_already_there(made):
