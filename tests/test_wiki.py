@@ -411,6 +411,20 @@ def test_a_day_is_ordered_by_when_each_session_started_not_by_filename(made):
     ]
 
 
+def test_a_day_is_ordered_by_instant_not_by_string_across_an_offset_change(made):
+    """`started:` is now local, so it carries a UTC offset that can vary across a DST boundary
+    (#29). Lexicographic string sort gets this pair backwards: "01:15" text-sorts before "01:30"
+    even though the +11:00 card's instant (14:30 UTC) is earlier than the +10:00 card's (15:15
+    UTC) — an AEDT-then-AEST-style transition."""
+    card(made, "2026-04-05-aaaaaaaa.md", "2026-04-05T01:30:00+11:00")  # 2026-04-04T14:30Z
+    card(made, "2026-04-05-bbbbbbbb.md", "2026-04-05T01:15:00+10:00")  # 2026-04-04T15:15Z
+
+    assert wiki.day_cards(made, "2026-04-05") == [
+        "raw/sessions/claude-code/2026-04-05-aaaaaaaa.md",
+        "raw/sessions/claude-code/2026-04-05-bbbbbbbb.md",
+    ]
+
+
 def test_a_card_without_a_started_field_still_belongs_to_the_day_in_its_name(made):
     """The `made` fixture's card carries no `started:` — it must not vanish from its own day."""
     assert wiki.day_cards(made, TODAY) == [RAW]

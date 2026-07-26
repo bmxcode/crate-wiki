@@ -50,7 +50,7 @@ Three further points the table turns on:
 
 **Days are grouped by the card's own declared date.** `started:` from the card's frontmatter, falling back to the date in its filename, which capture minted from the same field. Never mtime: a `git checkout` rewrites every mtime in a vault (the reason [ADR-0010](0010-conventions-file-and-upgrade-baseline.md) hashes content instead), and a resumed session rewrites its card days after the day it records.
 
-The consequence to state plainly is that those timestamps are UTC, so a late-evening session in a western timezone is already filed under the next day and a daily page inherits that. The alternative — converting to local time in `/daily` — would put a card named `2026-07-25-…md` on the `2026-07-24` page, and two disagreeing notions of a card's date is worse than one that's honest and consistent. If it's worth fixing it's worth fixing where the date is minted, in the capture layer, which is a separate change to a contract `/daily` only reads.
+The consequence to state plainly is that those timestamps are UTC, so a late-evening session in a western timezone is already filed under the next day and a daily page inherits that. The alternative — converting to local time in `/daily` — would put a card named `2026-07-25-…md` on the `2026-07-24` page, and two disagreeing notions of a card's date is worse than one that's honest and consistent. If it's worth fixing it's worth fixing where the date is minted, in the capture layer, which is a separate change to a contract `/daily` only reads. [ADR-0013](0013-local-session-timestamps.md) is that change.
 
 ## Alternatives rejected
 

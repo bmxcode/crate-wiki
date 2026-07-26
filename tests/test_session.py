@@ -5,6 +5,10 @@ history is exposed retroactively when it goes public (see CLAUDE.md and the D2 i
 """
 
 import json
+import os
+import time
+
+import pytest
 
 from crate_wiki import session, vault
 
@@ -52,6 +56,32 @@ def write_session(tmp_path, records, name="session.jsonl"):
 
 def parse(tmp_path, records):
     return session.parse(write_session(tmp_path, records), crate_version="0.1.0")
+
+
+@pytest.fixture
+def pinned_tz():
+    """Pin the process timezone to a fixed UTC+10, no-DST zone for one test.
+
+    Session dates/times are now local, so a test asserting on them would pass under the test
+    runner's timezone (commonly UTC in CI) and fail on a contributor's machine that isn't UTC —
+    the same class of environment-dependent flake `conftest.py`'s CRATE_TEST_CLOCK exists for.
+    Pin it explicitly instead of inheriting the runner's.
+
+    `time.tzset()` mutates process-wide state, so both the set and the restore have to go
+    through it, here — `monkeypatch.setenv` reverts `os.environ` on teardown but never calls
+    `tzset()` itself, which would leave every later test's `astimezone()` reading the pinned zone.
+    """
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "Etc/GMT-10"  # UTC+10 — POSIX inverts the Etc/GMT sign
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 # A straightforward linear session used by several tests.
@@ -243,7 +273,7 @@ def test_a_dangling_parent_stops_the_walk_cleanly(tmp_path):
     assert "after compaction" in card.render()
 
 
-def test_bookkeeping_records_after_the_last_turn_do_not_become_the_leaf(tmp_path):
+def test_bookkeeping_records_after_the_last_turn_do_not_become_the_leaf(tmp_path, pinned_tz):
     # Real sessions end with title/queue records appended after the conversation. They carry
     # a sessionId but no parentUuid, so the leaf must be the last real turn, not the last line.
     records = [
@@ -254,7 +284,8 @@ def test_bookkeeping_records_after_the_last_turn_do_not_become_the_leaf(tmp_path
     ]
     card = parse(tmp_path, records)
 
-    assert card.date == "2026-07-19", "must not fall back to 'undated'"
+    # LINEAR's UTC timestamps land on 2026-07-20 local under the pinned UTC+10 zone.
+    assert card.date == "2026-07-20", "must not fall back to 'undated'"
     assert card.title == "d2-session-parser", "must not fall back to the short session id"
     assert [t.role for t in card.turns] == ["user", "assistant"]
     assert card.duration_min == 72
@@ -336,11 +367,50 @@ def test_frontmatter_carries_the_deterministic_rollup(tmp_path):
     assert "commands: 1" in rendered
 
 
-def test_the_title_and_filename_lead_with_branch_and_date(tmp_path):
+def test_the_title_and_filename_lead_with_branch_and_date(tmp_path, pinned_tz):
     card = parse(tmp_path, LINEAR)
     assert card.title == "d2-session-parser"
-    assert card.date == "2026-07-19"
-    assert card.filename() == "2026-07-19-9f3a1c2e.md"
+    # LINEAR's UTC timestamps land on 2026-07-20 local under the pinned UTC+10 zone.
+    assert card.date == "2026-07-20"
+    assert card.filename() == "2026-07-20-9f3a1c2e.md"
+
+
+# --------------------------------------------------------------------------------------
+# local time (#29) — a card is dated and timed by the machine's wall clock, not UTC
+# --------------------------------------------------------------------------------------
+
+
+def test_a_late_utc_session_is_dated_by_local_day_not_utc_day(tmp_path, pinned_tz):
+    # 23:30-23:45 UTC is 09:30-09:45 the next day under the pinned UTC+10 zone — a session that
+    # ran entirely on one local day must not be filed under the UTC day before it.
+    records = [
+        rec("u1", None, "user", "Late one.", timestamp="2026-07-19T23:30:00.000Z"),
+        rec(
+            "a1",
+            "u1",
+            "assistant",
+            [{"type": "text", "text": "Still going."}],
+            timestamp="2026-07-19T23:45:00.000Z",
+        ),
+    ]
+    card = parse(tmp_path, records)
+    assert card.date == "2026-07-20"
+    assert card.filename() == "2026-07-20-9f3a1c2e.md"
+
+
+def test_turn_timestamps_render_in_local_time_not_utc(tmp_path, pinned_tz):
+    records = [rec("u1", None, "user", "Hi.", timestamp="2026-07-19T14:03:00.000Z")]
+    rendered = parse(tmp_path, records).render()
+    assert "· 00:03" in rendered  # 14:03 UTC + 10h
+    assert "· 14:03" not in rendered
+
+
+def test_an_unparseable_timestamp_does_not_crash_and_degrades_quietly(tmp_path, pinned_tz):
+    records = [rec("u1", None, "user", "Odd.", timestamp="not-a-timestamp")]
+    card = parse(tmp_path, records)
+    assert card is not None
+    assert card.started == "not-a-timestamp"  # _local's guard: unchanged, not raised
+    assert card.turns[0].time == ""  # _hhmm's guard: blank, not a crash
 
 
 def test_paths_inside_the_cwd_are_relativized_and_others_stay_absolute(tmp_path):
@@ -392,12 +462,13 @@ def make_vault(tmp_path):
     return target
 
 
-def test_capture_writes_a_card_into_the_vault(tmp_path):
+def test_capture_writes_a_card_into_the_vault(tmp_path, pinned_tz):
     target = make_vault(tmp_path)
     result = session.capture(write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
 
     assert result.written
-    card = target / "raw" / "sessions" / "claude-code" / "2026-07-19-9f3a1c2e.md"
+    # LINEAR's UTC timestamps land on 2026-07-20 local under the pinned UTC+10 zone.
+    card = target / "raw" / "sessions" / "claude-code" / "2026-07-20-9f3a1c2e.md"
     assert card.is_file()
     assert "Implement D2" in card.read_text()
 
