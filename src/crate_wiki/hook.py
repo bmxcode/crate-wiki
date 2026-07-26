@@ -25,7 +25,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from crate_wiki import session, vault
+from crate_wiki import cards, claude, vault
 
 # Outside any vault, in a directory Claude Code guarantees exists: a broken or missing vault is
 # one of the failure modes we must log, so the log cannot live inside the vault it's reporting on.
@@ -51,14 +51,16 @@ def capture_from_hook(
     transcript: Path | None,
     stdin_text: str,
     crate_version: str,
+    parse=claude.parse,
     log_path: Path | None = None,
 ) -> None:
     """Capture the session named on stdin (or by `--transcript`), and never raise.
 
-    Every failure mode — no vault, malformed stdin, a missing transcript, a broken vault, a
-    half-written session file — is logged and swallowed. The caller always exits 0. This is the
-    ADR-0002 contract: a missed capture is a lost line in a log; a raised capture is a session
-    that wouldn't end.
+    `parse` is the source adapter's parser (`claude.parse`, `codex.parse`); everything else here
+    is source-agnostic. Every failure mode — no vault, malformed stdin, a missing transcript, a
+    broken vault, a half-written session file — is logged and swallowed. The caller always exits
+    0. This is the ADR-0002 contract: a missed capture is a lost line in a log; a raised capture
+    is a session that wouldn't end.
     """
     log_path = log_path or LOG_PATH
     try:
@@ -73,7 +75,7 @@ def capture_from_hook(
             _log(f"skip: no such transcript {source}", log_path=log_path)
             return
 
-        result = session.capture(source, vault_path, crate_version=crate_version)
+        result = cards.capture(parse, source, vault_path, crate_version=crate_version)
         rel = _display_path(result.card_path, vault_path)
         if result.written:
             _log(f"captured {result.session_id[:8]} -> {rel}", log_path=log_path)

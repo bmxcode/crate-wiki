@@ -1,0 +1,392 @@
+"""Tests for the Codex source adapter (`codex.py`) and `cards.capture`.
+
+Every fixture here is synthetic, built inline — no real Codex rollout ever enters this repo, the
+same rule the Claude tests follow (see CLAUDE.md). This suite is the D7 proof: the same card
+model, renderer, and cursor as `test_claude.py`, fed a different on-disk format. Where the Claude
+fixtures build a `parentUuid` tree, these build a flat append-only log of `{timestamp, type,
+payload}` records — Codex's real shape, minus the content.
+"""
+
+import json
+
+from crate_wiki import cards, claude, codex, vault
+
+# The cross-source capture test reuses the Claude suite's synthetic session; `pinned_tz` is a
+# shared fixture from conftest.py.
+from test_claude import LINEAR as CLAUDE_LINEAR
+from test_claude import write_session as write_claude_session
+
+SID = "019f92a0-c0b5-7773-84ca-334c57776605"
+TS = "2026-07-19T14:03:00+10:00"  # already local (UTC+10); no conversion needed for content tests
+
+
+# --------------------------------------------------------------------------------------
+# a tiny builder for synthetic Codex rollouts
+# --------------------------------------------------------------------------------------
+
+
+def env(type_, payload, ts=TS):
+    """One rollout line: the `{timestamp, type, payload}` envelope every Codex record shares."""
+    return {"timestamp": ts, "type": type_, "payload": payload}
+
+
+def meta(ts=TS, **over):
+    payload = {
+        "session_id": SID,
+        "id": SID,
+        "cwd": "/home/me/repo/crate-wiki",
+        "git": {"branch": "d7-codex-parser", "commit_hash": "abc123", "repository_url": "x"},
+        "cli_version": "0.31.0",
+        "originator": "codex_cli",
+        "source": "cli",
+    }
+    payload.update(over)
+    return env("session_meta", payload, ts)
+
+
+def msg(role, text, ts=TS):
+    ctype = "output_text" if role == "assistant" else "input_text"
+    return env(
+        "response_item",
+        {"type": "message", "role": role, "content": [{"type": ctype, "text": text}]},
+        ts,
+    )
+
+
+def fcall(name, args, ts=TS):
+    """A `function_call` — `arguments` is a JSON-encoded string, the way Codex writes it."""
+    return env(
+        "response_item",
+        {"type": "function_call", "name": name, "arguments": json.dumps(args), "call_id": "fc1"},
+        ts,
+    )
+
+
+def exec_cmd(cmd, ts=TS):
+    return fcall("exec_command", {"cmd": cmd}, ts)
+
+
+def apply_patch_body(*ops):
+    """An apply-patch envelope touching the given `(op, path)` files, e.g. ("Update", "a.py")."""
+    lines = ["*** Begin Patch"]
+    for op, path in ops:
+        lines.append(f"*** {op} File: {path}")
+        if op != "Delete":
+            lines += ["@@", "+a change"]
+    lines.append("*** End Patch")
+    return "\n".join(lines)
+
+
+def patch(*ops, ts=TS):
+    body = apply_patch_body(*ops)
+    return env(
+        "response_item",
+        {"type": "custom_tool_call", "name": "apply_patch", "input": body, "call_id": "ct1"},
+        ts,
+    )
+
+
+def reasoning(text, ts=TS):
+    return env("response_item", {"type": "reasoning", "summary": [], "encrypted_content": text}, ts)
+
+
+def tool_output(text, ts=TS):
+    return env(
+        "response_item", {"type": "function_call_output", "call_id": "fc1", "output": text}, ts
+    )
+
+
+def write_session(tmp_path, records, name="rollout.jsonl"):
+    path = tmp_path / name
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+def parse(tmp_path, records):
+    return codex.parse(write_session(tmp_path, records), crate_version="0.1.0")
+
+
+# A straightforward linear Codex session used by several tests.
+LINEAR = [
+    meta(),
+    msg("user", "Implement D7. Plan mode first."),
+    msg("assistant", "On it."),
+    exec_cmd("uv run pytest -q"),
+    patch(("Update", "src/crate_wiki/codex.py")),
+    tool_output("12 passed"),
+    msg("assistant", "All green."),
+]
+
+
+# --------------------------------------------------------------------------------------
+# what the card keeps
+# --------------------------------------------------------------------------------------
+
+
+def test_a_linear_codex_session_keeps_intent_prose_files_and_commands(tmp_path):
+    card = parse(tmp_path, LINEAR)
+
+    assert card is not None
+    assert card.turns[0].role == "user"
+    assert "Implement D7. Plan mode first." in card.turns[0].prose
+    assert card.files == ["src/crate_wiki/codex.py"]
+    assert card.command_count == 1
+
+    rendered = card.render()
+    assert "Implement D7. Plan mode first." in rendered
+    assert "All green." in rendered
+    assert "- run `uv run pytest -q`" in rendered
+    assert "- edit src/crate_wiki/codex.py" in rendered
+
+
+def test_each_assistant_record_folds_into_one_turn(tmp_path):
+    # Codex writes each message and tool call as its own record; unfolded, every step would be a
+    # turn. The card must read as user-then-assistant, the way the Claude adapter's already does.
+    card = parse(tmp_path, LINEAR)
+    assert [t.role for t in card.turns] == ["user", "assistant"]
+    assert card.turns[1].prose.startswith("On it.")
+    assert "All green." in card.turns[1].prose
+
+
+def test_prose_and_actions_render_in_document_order(tmp_path):
+    records = [
+        meta(),
+        msg("user", "Ship it."),
+        msg("assistant", "First I run the tests."),
+        exec_cmd("pytest"),
+        msg("assistant", "Green, so I commit."),
+        exec_cmd("git commit"),
+    ]
+    body = parse(tmp_path, records).render()
+    order = [body.index(s) for s in ("First I run", "pytest", "Green, so I commit", "git commit")]
+    assert order == sorted(order), "prose and actions must stay interleaved in order"
+
+
+def test_apply_patch_add_update_delete_all_become_edit_actions(tmp_path):
+    # One patch can touch several files at once; each *** … File: marker is one edit.
+    records = [
+        meta(),
+        msg("user", "Refactor."),
+        patch(("Add", "new.py"), ("Update", "changed.py"), ("Delete", "gone.py")),
+    ]
+    card = parse(tmp_path, records)
+    assert card.files == ["changed.py", "gone.py", "new.py"]
+    rendered = card.render()
+    for path in ("new.py", "changed.py", "gone.py"):
+        assert f"- edit {path}" in rendered
+
+
+def test_an_argv_list_command_renders_as_one_line(tmp_path):
+    records = [meta(), msg("user", "Run it."), exec_cmd(["bash", "-lc", "pytest -q"])]
+    card = parse(tmp_path, records)
+    assert card.command_count == 1
+    assert "- run `bash -lc pytest -q`" in card.render()
+
+
+def test_developer_and_injected_user_messages_never_pose_as_prompts(tmp_path):
+    records = [
+        meta(),
+        msg("developer", "<permissions>\nfull access\n</permissions>"),
+        msg("user", "<environment_context>\ncwd=/x\n</environment_context>"),
+        msg("user", "Real intent here."),
+        msg("assistant", "Working."),
+    ]
+    card = parse(tmp_path, records)
+
+    assert [t.role for t in card.turns] == ["user", "assistant"]
+    assert "Real intent here." in card.turns[0].prose
+    rendered = card.render()
+    assert "environment_context" not in rendered
+    assert "permissions" not in rendered
+    assert "full access" not in rendered
+
+
+def test_reasoning_and_tool_output_bodies_are_dropped(tmp_path):
+    records = [
+        meta(),
+        msg("user", "Go."),
+        reasoning("secret internal reasoning I should not leak"),
+        exec_cmd("ls"),
+        tool_output("tons of stdout noise that would drown the signal"),
+        msg("assistant", "Done."),
+    ]
+    rendered = parse(tmp_path, records).render()
+    assert "secret internal reasoning" not in rendered
+    assert "tons of stdout noise" not in rendered
+    assert "Done." in rendered
+    assert "- run `ls`" in rendered
+
+
+def test_noise_function_calls_do_not_become_actions(tmp_path):
+    records = [
+        meta(),
+        msg("user", "Plan."),
+        fcall("update_plan", {"plan": [{"step": "x", "status": "pending"}]}),
+        fcall("write_stdin", {"session_id": "s", "chars": "y"}),
+        fcall("request_user_input", {"questions": []}),
+        msg("assistant", "Planned."),
+    ]
+    card = parse(tmp_path, records)
+    assert card.command_count == 0
+    assert card.files == []
+    assert card.subagent_count == 0  # Codex has no sidechains — subagents are always zero
+
+
+def test_malformed_function_arguments_degrade_quietly(tmp_path):
+    # A model can emit `arguments` that isn't valid JSON. It must not crash capture (ADR-0002).
+    bad = env(
+        "response_item",
+        {"type": "function_call", "name": "exec_command", "arguments": "{not json", "call_id": "x"},
+    )
+    records = [meta(), msg("user", "Run."), bad, msg("assistant", "ok")]
+    card = parse(tmp_path, records)
+    assert card is not None
+    assert card.command_count == 0  # no cmd could be recovered, but nothing raised
+
+
+# --------------------------------------------------------------------------------------
+# metadata, the rollup, and local time
+# --------------------------------------------------------------------------------------
+
+
+def test_frontmatter_carries_source_and_metadata(tmp_path):
+    rendered = parse(tmp_path, LINEAR).render()
+    assert "source: codex" in rendered
+    assert "git_branch: d7-codex-parser" in rendered
+    assert "tool_version: 0.31.0" in rendered
+    assert "crate_version: 0.1.0" in rendered
+    assert "files: [src/crate_wiki/codex.py]" in rendered
+    assert "commands: 1" in rendered
+
+
+def test_session_id_and_filename_come_from_session_meta(tmp_path, pinned_tz):
+    records = [
+        meta(ts="2026-07-19T14:00:00Z"),
+        msg("user", "Hi.", ts="2026-07-19T14:00:00Z"),
+    ]
+    card = parse(tmp_path, records)
+    assert card.session_id == SID
+    # 14:00 UTC is 2026-07-20 00:00 local under the pinned UTC+10 zone.
+    assert card.date == "2026-07-20"
+    assert card.filename() == "2026-07-20-019f92a0.md"
+
+
+def test_a_late_utc_session_is_dated_and_timed_by_local_day(tmp_path, pinned_tz):
+    # 23:30 UTC is 09:30 the next day under UTC+10 — Codex inherits #30's local-time dating for
+    # free through the shared core, so its cards must not misfile to the UTC day either.
+    records = [
+        meta(ts="2026-07-19T23:30:00Z"),
+        msg("user", "Late one.", ts="2026-07-19T23:30:00Z"),
+    ]
+    card = parse(tmp_path, records)
+    assert card.date == "2026-07-20"
+    rendered = card.render()
+    assert "· 09:30" in rendered  # 23:30 UTC + 10h
+    assert "· 23:30" not in rendered
+
+
+def test_an_unparseable_timestamp_does_not_crash(tmp_path):
+    records = [meta(ts="not-a-timestamp"), msg("user", "Odd.", ts="not-a-timestamp")]
+    card = parse(tmp_path, records)
+    assert card is not None
+    assert card.turns[0].time == ""  # _hhmm's guard: blank, not a crash
+
+
+def test_an_empty_or_metadata_only_session_parses_to_nothing(tmp_path):
+    assert parse(tmp_path, []) is None
+    assert parse(tmp_path, [meta()]) is None  # a header with no conversation is nothing usable
+
+
+def test_malformed_lines_are_skipped_not_fatal(tmp_path):
+    path = tmp_path / "r.jsonl"
+    good = json.dumps(msg("user", "keep me"))
+    path.write_text(good + "\n{ this is not json\n", encoding="utf-8")
+
+    card = codex.parse(path, crate_version="0.1.0")
+    assert card is not None
+    assert "keep me" in card.render()
+
+
+# --------------------------------------------------------------------------------------
+# capture: writing into a vault, idempotently, alongside Claude
+# --------------------------------------------------------------------------------------
+
+
+def make_vault(tmp_path):
+    target = tmp_path / "vault"
+    vault.create(target, "personal", version="0.1.0")
+    return target
+
+
+def test_capture_writes_a_codex_card_under_its_own_dir(tmp_path, pinned_tz):
+    target = make_vault(tmp_path)
+    records = [meta(ts="2026-07-19T14:00:00Z"), msg("user", "Hi.", ts="2026-07-19T14:00:00Z")]
+    result = cards.capture(
+        codex.parse, write_session(tmp_path, records), target, crate_version="0.1.0"
+    )
+
+    assert result.written
+    card = target / "raw" / "sessions" / "codex" / "2026-07-20-019f92a0.md"
+    assert card.is_file()
+    assert "Hi." in card.read_text()
+
+
+def test_a_second_codex_capture_writes_nothing_new(tmp_path):
+    target = make_vault(tmp_path)
+    path = write_session(tmp_path, LINEAR)
+
+    first = cards.capture(codex.parse, path, target, crate_version="0.1.0")
+    stamp = first.card_path.stat().st_mtime_ns
+    marker = first.card_path.read_text() + "\nEDITED BY HAND\n"
+    first.card_path.write_text(marker)  # prove the re-run doesn't touch it
+
+    second = cards.capture(codex.parse, path, target, crate_version="0.1.0")
+    assert not second.written
+    assert second.card_path.read_text() == marker
+    assert second.card_path.stat().st_mtime_ns >= stamp
+
+
+def test_a_resumed_codex_session_re_renders_the_same_card(tmp_path):
+    target = make_vault(tmp_path)
+    cards.capture(codex.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+
+    resumed = [*LINEAR, msg("user", "One more thing."), exec_cmd("git push")]
+    result = cards.capture(
+        codex.parse, write_session(tmp_path, resumed), target, crate_version="0.1.0"
+    )
+
+    assert result.written  # more records → a new cursor → the one card is re-rendered
+    text = result.card_path.read_text()
+    assert "One more thing." in text
+    assert "- run `git push`" in text
+
+    written = list((target / "raw" / "sessions" / "codex").glob("*.md"))
+    assert len(written) == 1, "a resume updates the one card, it does not fragment"
+
+
+def test_the_codex_cursor_is_the_record_count_under_its_own_source(tmp_path):
+    target = make_vault(tmp_path)
+    cards.capture(codex.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+
+    state = json.loads((target / ".crate" / "state.json").read_text())
+    cursor = state["codex"][SID]
+    assert cursor["cursor"] == str(len(LINEAR))
+    assert cursor["records"] == len(LINEAR)
+
+
+def test_capturing_codex_does_not_disturb_the_claude_cursor(tmp_path):
+    # Both sources into one vault: the state file keeps a block per source, and the cards land in
+    # sibling directories. This is the whole point of D7 — a second front-end, no collision.
+    target = make_vault(tmp_path)
+    cards.capture(
+        claude.parse, write_claude_session(tmp_path, CLAUDE_LINEAR), target, crate_version="0.1.0"
+    )
+    cards.capture(codex.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+
+    state = json.loads((target / ".crate" / "state.json").read_text())
+    assert set(state) == {"claude-code", "codex"}
+    assert state["claude-code"]["9f3a1c2e-0000-0000-0000-000000000000"]["cursor"] == "a3"
+    assert state["codex"][SID]["cursor"] == str(len(LINEAR))
+
+    assert list((target / "raw" / "sessions" / "claude-code").glob("*.md"))
+    assert list((target / "raw" / "sessions" / "codex").glob("*.md"))

@@ -16,6 +16,7 @@ One record per decision where a real alternative was rejected. If there was no a
 | [0011](0011-ask-and-the-promoted-synthesis.md) | `/ask` promotes an answer to a page, and adds no CLI to do it | ADR-0008 mandates the record; "no new subcommand" needs a defence |
 | [0012](0012-daily-reads-raw-and-earns-a-command.md) | `/daily` reads `raw/` directly, and earns one command to do it | Reverses 0011's outcome one deliverable later, on the same test |
 | [0013](0013-local-session-timestamps.md) | Session cards are dated and timed in local wall-clock time | Converting in place vs. adding a separate local `date:` field |
+| [0014](0014-shared-card-core-per-source-adapters.md) | A shared card core, with a thin adapter per session source | Proving the abstraction (a second source) vs. branching in one module |
 
 0007 is deliberately unused: every work vault's `config.toml` reserves it for the record that would
 have to be written to reopen [ADR-0001](0001-local-only-work-vault.md) and give that vault a remote.

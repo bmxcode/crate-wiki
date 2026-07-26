@@ -23,6 +23,9 @@ and prevented outright by fixtures pinning mtime rather than letting it default 
 
 import datetime
 import os
+import time
+
+import pytest
 
 _CLOCK = os.environ.get("CRATE_TEST_CLOCK")
 
@@ -36,3 +39,29 @@ if _CLOCK:
             return cls.fromisoformat(_CLOCK)
 
     datetime.date = _FixedDate
+
+
+@pytest.fixture
+def pinned_tz():
+    """Pin the process timezone to a fixed UTC+10, no-DST zone for one test.
+
+    Session dates/times are local, so a test asserting on them would pass under the test runner's
+    timezone (commonly UTC in CI) and fail on a contributor's machine that isn't UTC — the same
+    class of environment-dependent flake `CRATE_TEST_CLOCK` above exists for. Pin it explicitly
+    instead of inheriting the runner's. Shared here so both the Claude and Codex suites use it.
+
+    `time.tzset()` mutates process-wide state, so both the set and the restore have to go through
+    it, here — `monkeypatch.setenv` reverts `os.environ` on teardown but never calls `tzset()`
+    itself, which would leave every later test's `astimezone()` reading the pinned zone.
+    """
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "Etc/GMT-10"  # UTC+10 — POSIX inverts the Etc/GMT sign
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()

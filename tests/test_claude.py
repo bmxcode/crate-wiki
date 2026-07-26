@@ -1,16 +1,12 @@
-"""Tests for the Claude Code session parser and `crate capture`.
+"""Tests for the Claude Code source adapter (`claude.py`) and `cards.capture`.
 
 Every fixture here is synthetic, built inline — no real session ever enters this repo, because
 history is exposed retroactively when it goes public (see CLAUDE.md and the D2 issue).
 """
 
 import json
-import os
-import time
 
-import pytest
-
-from crate_wiki import session, vault
+from crate_wiki import cards, claude, vault
 
 # --------------------------------------------------------------------------------------
 # a tiny builder for synthetic session trees
@@ -55,33 +51,10 @@ def write_session(tmp_path, records, name="session.jsonl"):
 
 
 def parse(tmp_path, records):
-    return session.parse(write_session(tmp_path, records), crate_version="0.1.0")
+    return claude.parse(write_session(tmp_path, records), crate_version="0.1.0")
 
 
-@pytest.fixture
-def pinned_tz():
-    """Pin the process timezone to a fixed UTC+10, no-DST zone for one test.
-
-    Session dates/times are now local, so a test asserting on them would pass under the test
-    runner's timezone (commonly UTC in CI) and fail on a contributor's machine that isn't UTC —
-    the same class of environment-dependent flake `conftest.py`'s CRATE_TEST_CLOCK exists for.
-    Pin it explicitly instead of inheriting the runner's.
-
-    `time.tzset()` mutates process-wide state, so both the set and the restore have to go
-    through it, here — `monkeypatch.setenv` reverts `os.environ` on teardown but never calls
-    `tzset()` itself, which would leave every later test's `astimezone()` reading the pinned zone.
-    """
-    previous = os.environ.get("TZ")
-    os.environ["TZ"] = "Etc/GMT-10"  # UTC+10 — POSIX inverts the Etc/GMT sign
-    time.tzset()
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = previous
-        time.tzset()
+# `pinned_tz` lives in conftest.py now — shared with the Codex suite.
 
 
 # A straightforward linear session used by several tests.
@@ -361,7 +334,7 @@ def test_frontmatter_carries_the_deterministic_rollup(tmp_path):
     assert card.duration_min == 72  # 14:03 → 15:15
     assert "source: claude-code" in rendered
     assert "git_branch: d2-session-parser" in rendered
-    assert "cc_version: 1.0.83" in rendered
+    assert "tool_version: 1.0.83" in rendered
     assert "crate_version: 0.1.0" in rendered
     assert "files: [src/crate_wiki/session.py]" in rendered
     assert "commands: 1" in rendered
@@ -442,7 +415,7 @@ def test_malformed_lines_are_skipped_not_fatal(tmp_path):
     good = json.dumps(rec("u1", None, "user", "keep me"))
     path.write_text(good + "\n{ this is not json\n", encoding="utf-8")
 
-    card = session.parse(path, crate_version="0.1.0")
+    card = claude.parse(path, crate_version="0.1.0")
     assert card is not None
     assert "keep me" in card.render()
 
@@ -464,7 +437,9 @@ def make_vault(tmp_path):
 
 def test_capture_writes_a_card_into_the_vault(tmp_path, pinned_tz):
     target = make_vault(tmp_path)
-    result = session.capture(write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+    result = cards.capture(
+        claude.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0"
+    )
 
     assert result.written
     # LINEAR's UTC timestamps land on 2026-07-20 local under the pinned UTC+10 zone.
@@ -477,13 +452,13 @@ def test_a_second_run_writes_nothing_new(tmp_path):
     target = make_vault(tmp_path)
     path = write_session(tmp_path, LINEAR)
 
-    first = session.capture(path, target, crate_version="0.1.0")
+    first = cards.capture(claude.parse, path, target, crate_version="0.1.0")
     card = first.card_path
     stamp = card.stat().st_mtime_ns
     marker = card.read_text() + "\nEDITED BY HAND\n"
     card.write_text(marker)  # prove the re-run doesn't touch it
 
-    second = session.capture(path, target, crate_version="0.1.0")
+    second = cards.capture(claude.parse, path, target, crate_version="0.1.0")
     assert not second.written
     assert card.read_text() == marker
     assert card.stat().st_mtime_ns >= stamp
@@ -492,7 +467,7 @@ def test_a_second_run_writes_nothing_new(tmp_path):
 def test_a_resumed_session_re_renders_the_same_card(tmp_path):
     target = make_vault(tmp_path)
 
-    session.capture(write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+    cards.capture(claude.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
 
     resumed = [
         *LINEAR,
@@ -505,33 +480,35 @@ def test_a_resumed_session_re_renders_the_same_card(tmp_path):
             timestamp="2026-07-19T15:22:00.000Z",
         ),
     ]
-    result = session.capture(write_session(tmp_path, resumed), target, crate_version="0.1.0")
+    result = cards.capture(
+        claude.parse, write_session(tmp_path, resumed), target, crate_version="0.1.0"
+    )
 
     assert result.written
     text = result.card_path.read_text()
     assert "One more thing." in text
     assert "tests/test_session.py" in text
 
-    cards = list((target / "raw" / "sessions" / "claude-code").glob("*.md"))
-    assert len(cards) == 1, "a resume updates the one card, it does not fragment"
+    written = list((target / "raw" / "sessions" / "claude-code").glob("*.md"))
+    assert len(written) == 1, "a resume updates the one card, it does not fragment"
 
 
 def test_capture_records_the_cursor_under_its_source(tmp_path):
     target = make_vault(tmp_path)
-    session.capture(write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+    cards.capture(claude.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
 
     state = json.loads((target / ".crate" / "state.json").read_text())
     cursor = state["claude-code"]["9f3a1c2e-0000-0000-0000-000000000000"]
-    assert cursor["last_uuid"] == "a3"
+    assert cursor["cursor"] == "a3"
 
 
 def test_capture_rewrites_a_deleted_card_even_if_the_cursor_matches(tmp_path):
     target = make_vault(tmp_path)
     path = write_session(tmp_path, LINEAR)
 
-    first = session.capture(path, target, crate_version="0.1.0")
+    first = cards.capture(claude.parse, path, target, crate_version="0.1.0")
     first.card_path.unlink()
 
-    second = session.capture(path, target, crate_version="0.1.0")
+    second = cards.capture(claude.parse, path, target, crate_version="0.1.0")
     assert second.written
     assert second.card_path.is_file()
