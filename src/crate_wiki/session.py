@@ -335,8 +335,8 @@ def parse(session: Path, *, crate_version: str) -> Card | None:
     return Card(
         session_id=_last(live, "sessionId"),
         turns=turns,
-        started=min(timestamps) if timestamps else "",
-        ended=max(timestamps) if timestamps else "",
+        started=_local(min(timestamps)) if timestamps else "",
+        ended=_local(max(timestamps)) if timestamps else "",
         cwd=_last(live, "cwd"),
         git_branch=_last(live, "gitBranch"),
         cc_version=_last(live, "version"),
@@ -534,6 +534,20 @@ def _parse_ts(timestamp: str) -> datetime | None:
         return None
 
 
+def _local(timestamp: str) -> str:
+    """`timestamp` (UTC-or-any-offset ISO-8601) as the local wall-clock time it happened at.
+
+    Capture always runs on the machine that owns the session, so its local timezone is the
+    wall clock that matters. Guarded like `_parse_ts`: unparseable, or a naive (tzinfo-less)
+    string — no offset to convert from — is returned unchanged. Capture is fail-quiet
+    (ADR-0002): a bad timestamp degrades the card, it never aborts the write.
+    """
+    parsed = _parse_ts(timestamp)
+    if parsed is None or parsed.tzinfo is None:
+        return timestamp
+    return parsed.astimezone().isoformat()
+
+
 def _hhmm(timestamp: str | None) -> str:
-    parsed = _parse_ts(timestamp) if timestamp else None
+    parsed = _parse_ts(_local(timestamp)) if timestamp else None
     return parsed.strftime("%H:%M") if parsed else ""

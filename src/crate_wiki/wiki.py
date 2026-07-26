@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from crate_wiki.vault import PAGE_TYPES, WIKI_DIRS, VaultError, load_config, template_text
@@ -288,7 +288,7 @@ def day_cards(vault: Path, day: str) -> list[str]:
         if started[:10] == day:
             dated.append((started, relative))
 
-    return [relative for _, relative in sorted(dated)]
+    return [relative for _, relative in sorted(dated, key=lambda item: _started_key(item[0]))]
 
 
 def _card_started(path: Path, relative: str) -> str:
@@ -311,6 +311,23 @@ def _card_started(path: Path, relative: str) -> str:
 
     match = _CARD_DATE.match(Path(relative).name)
     return match.group(1) if match else ""
+
+
+def _started_key(started: str) -> datetime:
+    """`started` as a sortable instant, for ordering a day's cards chronologically.
+
+    `started` is now a local timestamp carrying a UTC offset that can vary across a DST
+    boundary, so the lexicographic string sort this used to lean on no longer sorts
+    chronologically for free. A bare `YYYY-MM-DD` (`_card_started`'s filename fallback, no
+    time-of-day) anchors to UTC midnight — arbitrary but fixed, and it never raises comparing
+    a naive value against an aware one. A value that doesn't parse at all sorts first rather
+    than raising, so one bad card can't take `crate day` down with it.
+    """
+    try:
+        parsed = datetime.fromisoformat(started)
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------------------
