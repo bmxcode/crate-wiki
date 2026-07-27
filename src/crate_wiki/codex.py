@@ -191,6 +191,20 @@ def _meta(records: list[dict]) -> dict:
     return {}
 
 
+def _rollout_id(meta: dict) -> str:
+    """The id that identifies *this rollout file* — the card's identity.
+
+    Codex resumes a session into a *new* file rather than appending, and in that new file
+    `session_meta.id` is the per-file id (it matches the filename and is unique) while
+    `session_meta.session_id` is the shared thread root the resume forked from (its
+    `parent_thread_id`). Keying the card on `session_id` would collapse every resume segment of
+    a thread onto one filename, so the last capture silently overwrites the rest. So the card is
+    keyed on `id` — one rollout file, one card, the way the Claude adapter treats one file. Older
+    rollouts carry only `id`; the oldest could in theory carry only `session_id`, so fall back.
+    """
+    return str(meta.get("id") or meta.get("session_id") or "")
+
+
 def parse(session: Path, *, crate_version: str) -> Card | None:
     """Parse a Codex session JSONL into a Card, or None if there's nothing usable in it."""
     records = cards._load_records(session)
@@ -205,7 +219,7 @@ def parse(session: Path, *, crate_version: str) -> Card | None:
 
     return Card(
         source=SOURCE,
-        session_id=str(meta.get("session_id") or meta.get("id") or ""),
+        session_id=_rollout_id(meta),
         turns=turns,
         started=cards._local(min(timestamps)) if timestamps else "",
         ended=cards._local(max(timestamps)) if timestamps else "",

@@ -271,6 +271,48 @@ def test_session_id_and_filename_come_from_session_meta(tmp_path, pinned_tz):
     assert card.filename() == "2026-07-20-019f92a0.md"
 
 
+def test_a_resumed_segment_is_keyed_by_its_own_rollout_id_not_the_thread(tmp_path):
+    # Codex resumes into a NEW file whose session_meta.id is the per-file id and whose
+    # session_id is the shared thread root it forked from. The card must key on `id`, or every
+    # resume segment of a thread would collide onto one filename and overwrite the last.
+    thread = "019f92a0-c0b5-7773-84ca-334c57776605"
+    segment = "019f92a1-5032-7fc1-ae66-6fe0b8c64c54"
+    records = [
+        meta(session_id=thread, id=segment, parent_thread_id=thread),
+        msg("user", "Continue where we left off."),
+        msg("assistant", "Resuming."),
+    ]
+    card = parse(tmp_path, records)
+    assert card.session_id == segment  # the per-file id, not the thread root
+    assert card.filename().endswith("-019f92a1.md")
+
+
+def test_two_segments_of_one_thread_become_two_cards(tmp_path):
+    # The regression the real data exposed: capturing both halves of a resumed session must not
+    # collapse them onto one card (which loses whichever is captured first).
+    target = make_vault(tmp_path)
+    thread = "019f92a0-c0b5-7773-84ca-334c57776605"
+
+    first = [meta(id=thread, session_id=thread), msg("user", "Part one.")]
+    second = [
+        meta(id="019f92a1-5032-7fc1-ae66-6fe0b8c64c54", session_id=thread, parent_thread_id=thread),
+        msg("user", "Part two."),
+    ]
+    r1 = cards.capture(
+        codex.parse, write_session(tmp_path, first, "a.jsonl"), target, crate_version="0.1.0"
+    )
+    r2 = cards.capture(
+        codex.parse, write_session(tmp_path, second, "b.jsonl"), target, crate_version="0.1.0"
+    )
+
+    assert r1.written and r2.written
+    assert r1.card_path != r2.card_path, "each rollout segment gets its own card"
+    written = list((target / "raw" / "sessions" / "codex").glob("*.md"))
+    assert len(written) == 2
+    state = json.loads((target / ".crate" / "state.json").read_text())
+    assert set(state["codex"]) == {thread, "019f92a1-5032-7fc1-ae66-6fe0b8c64c54"}
+
+
 def test_a_late_utc_session_is_dated_and_timed_by_local_day(tmp_path, pinned_tz):
     # 23:30 UTC is 09:30 the next day under UTC+10 — Codex inherits #30's local-time dating for
     # free through the shared core, so its cards must not misfile to the UTC day either.
