@@ -9,6 +9,8 @@ payload}` records — Codex's real shape, minus the content.
 
 import json
 
+import pytest
+
 from crate_wiki import cards, claude, codex, vault
 
 # The cross-source capture test reuses the Claude suite's synthetic session; `pinned_tz` is a
@@ -497,3 +499,130 @@ def test_capturing_codex_does_not_disturb_the_claude_cursor(tmp_path):
 
     assert list((target / "raw" / "sessions" / "claude-code").glob("*.md"))
     assert list((target / "raw" / "sessions" / "codex").glob("*.md"))
+
+
+# --------------------------------------------------------------------------------------
+# capture_all — the manual sweep. Codex has no Stop hook, so this is the front door that
+# replaces one: point it at a sessions dir and it captures every new/changed rollout in it.
+# --------------------------------------------------------------------------------------
+
+
+def write_rollout(sessions_dir, name, records):
+    """A rollout file named the way `discover`'s glob expects, inside a sessions dir."""
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    path = sessions_dir / name
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+def test_capture_all_scans_captures_and_skips_across_a_sessions_dir(tmp_path):
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-a.jsonl", [meta(id="a-session"), msg("user", "Session A.")])
+    write_rollout(sessions, "rollout-b.jsonl", [meta(id="b-session"), msg("user", "Session B.")])
+    write_rollout(
+        sessions, "rollout-guardian.jsonl", [meta(id="g-session", thread_source="subagent")]
+    )
+    write_rollout(sessions, "rollout-empty.jsonl", [meta(id="empty-session")])
+
+    summary = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert summary.scanned == 4
+    assert len(summary.captured) == 2
+    assert summary.unchanged == 0
+    assert summary.skipped == 2  # the guardian thread and the metadata-only file
+    written = list((target / "raw" / "sessions" / "codex").glob("*.md"))
+    assert len(written) == 2
+
+
+def test_a_rollout_that_cannot_be_read_is_skipped_not_fatal(tmp_path):
+    # A directory whose name matches the glob: discover() finds it like any other rollout, but
+    # reading it as text raises — the per-file guard has to catch that, not just a None parse.
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-a.jsonl", [meta(id="a-session"), msg("user", "Good.")])
+    (sessions / "rollout-bad.jsonl").mkdir(parents=True)
+
+    summary = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert summary.scanned == 2
+    assert len(summary.captured) == 1
+    assert summary.skipped == 1
+
+
+def test_capture_all_is_idempotent(tmp_path):
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-a.jsonl", LINEAR)
+
+    first = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+    card_path = first.captured[0]
+    stamp = card_path.stat().st_mtime_ns
+    marker = card_path.read_text() + "\nEDITED BY HAND\n"
+    card_path.write_text(marker)  # prove the re-run doesn't touch it
+
+    second = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert second.captured == []
+    assert second.unchanged == 1
+    assert second.skipped == 0
+    assert card_path.read_text() == marker
+    assert card_path.stat().st_mtime_ns >= stamp
+
+
+def test_capture_all_gives_a_resumed_thread_two_cards_in_one_sweep(tmp_path):
+    # The same regression test_two_segments_of_one_thread_become_two_cards covers for a single
+    # `cards.capture` call, exercised through a sweep of both segments at once.
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    thread = "019f92a0-c0b5-7773-84ca-334c57776605"
+    segment = "019f92a1-5032-7fc1-ae66-6fe0b8c64c54"
+    write_rollout(
+        sessions, "rollout-1.jsonl", [meta(id=thread, session_id=thread), msg("user", "Part one.")]
+    )
+    write_rollout(
+        sessions,
+        "rollout-2.jsonl",
+        [meta(id=segment, session_id=thread, parent_thread_id=thread), msg("user", "Part two.")],
+    )
+
+    summary = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert summary.scanned == 2
+    assert len(summary.captured) == 2
+    written = list((target / "raw" / "sessions" / "codex").glob("*.md"))
+    assert len(written) == 2
+
+
+def test_capture_all_on_a_missing_sessions_dir_is_an_empty_summary(tmp_path):
+    target = make_vault(tmp_path)
+    summary = codex.capture_all(
+        target, crate_version="0.1.0", sessions_dir=tmp_path / "does-not-exist"
+    )
+    assert summary == codex.ScanSummary(0, [], 0, 0)
+
+
+def test_capture_all_still_validates_the_vault_even_with_nothing_to_scan(tmp_path):
+    with pytest.raises(vault.VaultError):
+        codex.capture_all(
+            tmp_path / "not-a-vault",
+            crate_version="0.1.0",
+            sessions_dir=tmp_path / "does-not-exist",
+        )
+
+
+def test_discover_finds_rollouts_oldest_first(tmp_path):
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-2026-07-19T14-00-00-b.jsonl", [meta()])
+    write_rollout(sessions, "rollout-2026-07-19T09-00-00-a.jsonl", [meta()])
+
+    found = codex.discover(sessions)
+
+    assert [p.name for p in found] == [
+        "rollout-2026-07-19T09-00-00-a.jsonl",
+        "rollout-2026-07-19T14-00-00-b.jsonl",
+    ]
+
+
+def test_discover_on_a_missing_dir_is_empty(tmp_path):
+    assert codex.discover(tmp_path / "nope") == []

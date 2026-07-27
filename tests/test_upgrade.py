@@ -48,6 +48,7 @@ def age(target):
     baseline.pop(".claude/commands/ingest.md", None)
     baseline.pop(".claude/commands/ask.md", None)
     baseline.pop(".claude/commands/daily.md", None)
+    baseline.pop(".claude/commands/fetch-codex.md", None)
     vault.write_baseline(target, baseline, "0.0.1")
 
 

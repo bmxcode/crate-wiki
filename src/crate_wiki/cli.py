@@ -123,34 +123,62 @@ def capture_claude(
 def capture_codex(
     vault_path: Annotated[
         Path | None,
-        typer.Option("--vault", help="Vault to write the card into."),
+        typer.Option("--vault", help="Vault to write cards into."),
     ] = None,
     transcript: Annotated[
         Path | None,
-        typer.Option("--transcript", help="A Codex rollout JSONL to capture."),
+        typer.Option("--transcript", help="A single Codex rollout JSONL to capture."),
+    ] = None,
+    sessions_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--sessions-dir",
+            help="Where Codex rollouts live. Defaults to ~/.codex/sessions.",
+        ),
     ] = None,
 ) -> None:
-    """Capture a Codex CLI session into a vault as a card.
+    """Capture Codex CLI sessions into a vault as cards.
 
-    Same interface as `capture claude`, a different on-disk format behind it. Codex has no Stop
-    hook to install (its rollouts live under ~/.codex/sessions/), so the manual path is the one
-    that matters: point `--transcript` at a `rollout-*.jsonl`. Fail-quiet by contract (ADR-0002)
-    — it never raises, always exits 0, and logs every outcome to ~/.claude/crate-capture.log.
+    Codex has no Stop hook (its `notify` slot fires per turn, not on session exit, and is already
+    taken by another program on most machines), so there's no single session to be handed at exit
+    the way Claude Code's is. With no `--transcript`, this sweeps every rollout under
+    `--sessions-dir` and captures every new or changed one, idempotently — strict like
+    `install-hook`: a bad vault is reported and exits 1, it does not fail quietly. `--transcript
+    FILE` is the single-file path, same fail-quiet contract as `capture claude`, for a manual
+    one-off.
     """
-    stdin_text = ""
-    if transcript is None and not sys.stdin.isatty():
-        try:
-            stdin_text = sys.stdin.read()
-        except Exception:  # noqa: BLE001 — a broken stdin must not break anything either
-            stdin_text = ""
+    if transcript is not None:
+        hook.capture_from_hook(
+            vault_path=vault_path,
+            transcript=transcript,
+            stdin_text="",
+            crate_version=__version__,
+            parse=codex.parse,
+        )
+        return
 
-    hook.capture_from_hook(
-        vault_path=vault_path,
-        transcript=transcript,
-        stdin_text=stdin_text,
-        crate_version=__version__,
-        parse=codex.parse,
+    if vault_path is None:
+        typer.secho("crate: capture codex needs --vault", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    try:
+        summary = codex.capture_all(
+            vault_path, crate_version=__version__, sessions_dir=sessions_dir
+        )
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    typer.echo(
+        f"scanned {summary.scanned}, captured {len(summary.captured)}, "
+        f"unchanged {summary.unchanged}, skipped {summary.skipped}"
     )
+    resolved_vault = vault_path.expanduser().resolve()
+    for path in summary.captured:
+        try:
+            rel = path.relative_to(resolved_vault)
+        except ValueError:
+            rel = path
+        typer.echo(f"  {rel}")
 
 
 @app.command("install-hook")
