@@ -16,12 +16,17 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
-from crate_wiki import cards
+from crate_wiki import cards, vault
 from crate_wiki.cards import Action, Card, Turn
 
 SOURCE = "codex"
+
+# Where Codex CLI writes rollouts. Overridable (`capture_all`'s `sessions_dir`) so tests don't
+# have to touch the real one.
+DEFAULT_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 
 
 # --------------------------------------------------------------------------------------
@@ -247,3 +252,72 @@ def parse(session: Path, *, crate_version: str) -> Card | None:
         cursor=str(len(records)),
         records=len(records),
     )
+
+
+# --------------------------------------------------------------------------------------
+# the sweep — manual, since Codex has no Stop-hook equivalent to drive capture per session
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ScanSummary:
+    """What one `capture_all` sweep did."""
+
+    scanned: int
+    captured: list[Path]
+    unchanged: int
+    skipped: int
+
+
+def discover(sessions_dir: Path) -> list[Path]:
+    """Every Codex rollout under `sessions_dir`, oldest first, or `[]` if it doesn't exist.
+
+    Sorted by path, not mtime: a rollout's real path is `<Y>/<M>/<D>/rollout-<ISO-ish
+    timestamp>-<id>.jsonl`, and both the zero-padded directory levels and the timestamp-prefixed
+    filename sort lexicographically in chronological order — so a plain path sort gives "oldest
+    first" without ever calling `stat()`, which a synced or restored sessions dir can't be
+    trusted to have kept meaningful.
+    """
+    if not sessions_dir.is_dir():
+        return []
+    return sorted(sessions_dir.rglob("rollout-*.jsonl"))
+
+
+def capture_all(
+    vault_path: Path, *, crate_version: str, sessions_dir: Path | None = None
+) -> ScanSummary:
+    """Sweep every Codex rollout under `sessions_dir` into `vault_path`, idempotently.
+
+    The vault is validated once up front (raises VaultError, same as `cards.capture` — this is
+    the strict path a human runs, not the hook's fail-quiet one). Each rollout is then parsed and
+    written independently: a `None` parse (a subagent/guardian thread, or a file with nothing
+    usable) is skipped, not an error; any other exception from parsing or writing one rollout is
+    also caught and counted as skipped, so one bad file among many can't abort the rest of the
+    sweep.
+    """
+    vault_path = vault_path.expanduser().resolve()
+    vault.load_config(vault_path)  # raises VaultError when it isn't a vault
+    sessions_dir = (sessions_dir or DEFAULT_SESSIONS_DIR).expanduser().resolve()
+
+    rollouts = discover(sessions_dir)
+    captured: list[Path] = []
+    unchanged = 0
+    skipped = 0
+
+    for rollout in rollouts:
+        try:
+            card = parse(rollout, crate_version=crate_version)
+            if card is None:
+                skipped += 1
+                continue
+            result = cards.write(card, vault_path)
+        except Exception:  # noqa: BLE001 — one bad rollout must not abort the sweep
+            skipped += 1
+            continue
+
+        if result.written:
+            captured.append(result.card_path)
+        else:
+            unchanged += 1
+
+    return ScanSummary(len(rollouts), captured, unchanged, skipped)

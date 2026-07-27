@@ -247,13 +247,12 @@ def _render_action(action: Action, cwd: str) -> str:
 
 
 def capture(parse, session: Path, vault_path: Path, *, crate_version: str) -> CaptureResult:
-    """Parse `session` with `parse` and write its card into the vault, unless already captured.
+    """Validate `session` and the vault, parse with `parse`, and write the resulting card.
 
     `parse` is a source adapter's `parse(session, *, crate_version) -> Card | None`; everything
-    from a parsed Card on is source-agnostic. Idempotent: the cursor in `.crate/state.json` is
-    keyed by the card's source and session id, so a Codex capture never touches Claude's cursor
-    and vice versa. A re-run with an unchanged cursor writes nothing; a resumed session (new
-    cursor) re-renders its one card. Raises VaultError on anything the user must fix.
+    from a parsed Card on is source-agnostic, and lives in `write`. Raises VaultError on anything
+    the user must fix: a bad vault, a missing session file, or a session with nothing usable in
+    it. See `write` for the idempotent part of the contract.
     """
     vault_path = vault_path.expanduser().resolve()
     vault.load_config(vault_path)  # raises VaultError when it isn't a vault
@@ -264,6 +263,18 @@ def capture(parse, session: Path, vault_path: Path, *, crate_version: str) -> Ca
     if card is None:
         raise vault.VaultError(f"no usable records in {session}")
 
+    return write(card, vault_path)
+
+
+def write(card: Card, vault_path: Path) -> CaptureResult:
+    """Write `card` into `vault_path` unless it's already captured. `vault_path` must already be
+    a resolved, validated vault — this does no validation of its own, so a caller sweeping many
+    cards into one vault (`codex.capture_all`) can validate once and call this per card.
+
+    Idempotent: the cursor in `.crate/state.json` is keyed by the card's source and session id, so
+    a Codex capture never touches Claude's cursor and vice versa. A re-run with an unchanged
+    cursor writes nothing; a resumed session (new cursor) re-renders its one card.
+    """
     state_path = vault_path / ".crate" / "state.json"
     state = _load_state(state_path)
     source_state = state.setdefault(card.source, {})

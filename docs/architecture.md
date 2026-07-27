@@ -169,3 +169,5 @@ So the Claude adapter walks to the active leaf, discards dead branches, and emit
 The result is roughly a tenth the size and carries nearly all the signal — which is also what makes Tier 1 affordable.
 
 A `state.json` cursor tracks what's already been captured, keyed per source, so the hook can run on every session and stay idempotent — and a Codex capture never disturbs Claude's cursor.
+
+Codex has no Stop hook to drive this automatically, so it's swept on demand instead: `crate capture codex` / `/fetch-codex` walks `~/.codex/sessions/` and captures every new or changed rollout in one idempotent pass.
