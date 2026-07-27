@@ -1,6 +1,6 @@
 """Tests for the Stop-hook front-end and the settings.json installer.
 
-Synthetic fixtures only — the session trees come from test_session.py's inline builders, and no
+Synthetic fixtures only — the session trees come from test_claude.py's inline builders, and no
 real session, settings file, or home directory is ever touched (the log is redirected into a
 tmp dir for every test). The contract under test is ADR-0002's: capture must never break session
 exit, so `crate capture claude` always exits 0 and logs, whatever it's handed.
@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from crate_wiki import hook, vault
 from crate_wiki.cli import app
-from test_session import LINEAR, write_session
+from test_claude import LINEAR, write_session
 
 runner = CliRunner()
 

@@ -11,7 +11,7 @@ from typing import Annotated
 
 import typer
 
-from crate_wiki import __version__, hook, vault, wiki
+from crate_wiki import __version__, codex, hook, vault, wiki
 
 # Every command below takes the vault it works on. Defaulting to the cwd is the common case by
 # far — you run these from inside the vault, or from a slash command whose cwd is the vault.
@@ -116,6 +116,40 @@ def capture_claude(
         transcript=transcript,
         stdin_text=stdin_text,
         crate_version=__version__,
+    )
+
+
+@capture_app.command("codex")
+def capture_codex(
+    vault_path: Annotated[
+        Path | None,
+        typer.Option("--vault", help="Vault to write the card into."),
+    ] = None,
+    transcript: Annotated[
+        Path | None,
+        typer.Option("--transcript", help="A Codex rollout JSONL to capture."),
+    ] = None,
+) -> None:
+    """Capture a Codex CLI session into a vault as a card.
+
+    Same interface as `capture claude`, a different on-disk format behind it. Codex has no Stop
+    hook to install (its rollouts live under ~/.codex/sessions/), so the manual path is the one
+    that matters: point `--transcript` at a `rollout-*.jsonl`. Fail-quiet by contract (ADR-0002)
+    — it never raises, always exits 0, and logs every outcome to ~/.claude/crate-capture.log.
+    """
+    stdin_text = ""
+    if transcript is None and not sys.stdin.isatty():
+        try:
+            stdin_text = sys.stdin.read()
+        except Exception:  # noqa: BLE001 — a broken stdin must not break anything either
+            stdin_text = ""
+
+    hook.capture_from_hook(
+        vault_path=vault_path,
+        transcript=transcript,
+        stdin_text=stdin_text,
+        crate_version=__version__,
+        parse=codex.parse,
     )
 
 

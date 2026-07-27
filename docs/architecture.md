@@ -149,12 +149,14 @@ step with no home, and nothing for a step the model should be doing.
 
 The most interesting component, because its job is **discarding, not converting**.
 
-Claude Code stores sessions as JSONL, one record per line, at `~/.claude/projects/<munged-cwd>/<session-uuid>.jsonl`. Two properties make naive conversion wrong:
+It splits along one seam (ADR-0014): a shared core (`cards.py`) owns the *session card* — the model, the Markdown renderer, and the idempotent cursor — and a thin **adapter per source** owns reading that source's on-disk format up to a card. Two sources exist today, `claude.py` and `codex.py`, and they differ in exactly the way that makes the split worth having.
+
+**Claude Code** stores sessions as JSONL, one record per line, at `~/.claude/projects/<munged-cwd>/<session-uuid>.jsonl`. Two properties make naive conversion wrong:
 
 - **`parentUuid` makes a session a tree, not a transcript.** Rewinding or editing a prompt branches it. A flat read replays abandoned work as though it happened.
 - **`tool_result` bodies dominate the bytes.** A whole file read, a full test log — none of it is what you did, and all of it drowns what you did.
 
-So the parser walks to the active leaf, discards dead branches, and emits a *session card*:
+So the Claude adapter walks to the active leaf, discards dead branches, and emits a card:
 
 | | |
 |---|---|
@@ -162,6 +164,8 @@ So the parser walks to the active leaf, discards dead branches, and emits a *ses
 | **Drop** | `tool_result` bodies, `thinking` blocks, dead branches |
 | **Collapse** | Sidechains (`isSidechain`) to one line per subagent |
 
+**Codex** (`~/.codex/sessions/<Y>/<M>/<D>/rollout-*.jsonl`) is the counter-example that proves the model generalizes: a flat append-only log with no tree and no rewinds, where a command is a `function_call` and a file edit is an `apply_patch` whose path lives inside a patch string. Its adapter is a linear scan rather than a tree walk, keeps and drops the same *kinds* of thing, and emits the same card. The structure differs but the shape recurs — Codex resumes into a *new* file (so a card is keyed by the per-file rollout id, not the shared thread id), and its subagents (the `guardian` auto-approver) are their own files marked `thread_source: subagent`, the equivalent of Claude's sidechains and dropped the same way.
+
 The result is roughly a tenth the size and carries nearly all the signal — which is also what makes Tier 1 affordable.
 
-A `state.json` cursor tracks what's already been captured, so the hook can run on every session and stay idempotent.
+A `state.json` cursor tracks what's already been captured, keyed per source, so the hook can run on every session and stay idempotent — and a Codex capture never disturbs Claude's cursor.

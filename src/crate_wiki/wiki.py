@@ -241,7 +241,7 @@ RELATIVE_DAYS = {"today": 0, "yesterday": 1}
 
 _ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 
-# A card is named `<date>-<short session id>.md` by the capture layer.
+# A card is named `<date>-<session id>.md` by the capture layer.
 _CARD_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})-")
 
 
@@ -269,7 +269,7 @@ def day_cards(vault: Path, day: str) -> list[str]:
     """The session cards belonging to `day`, oldest first, vault-relative and posix.
 
     Oldest first is the point: a day reads as an account only in the order it happened, and the
-    filename can't give that — a card is `<date>-<short id>.md`, so sorting names sorts by
+    filename can't give that — a card is `<date>-<session id>.md`, so sorting names sorts by
     session id. The order lives in `started:`, which is why this is code.
 
     Every session front-end is included (`raw/sessions/*/`), so a Codex card sits in the same day
