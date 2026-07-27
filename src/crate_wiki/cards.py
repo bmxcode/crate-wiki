@@ -117,7 +117,7 @@ class Card:
         return _short(self.session_id)
 
     def filename(self) -> str:
-        return f"{self.date}-{_short(self.session_id)}.md"
+        return f"{self.date}-{_slug(self.session_id)}.md"
 
     def render(self) -> str:
         return _render_card(self)
@@ -314,7 +314,21 @@ def _last(records: list[dict], key: str) -> str:
 
 
 def _short(session_id: str) -> str:
+    """A truncated id for a human-facing label (a card title) — collisions there are cosmetic."""
     return session_id[:8] if session_id else "unknown"
+
+
+def _slug(session_id: str) -> str:
+    """The full session id, made filesystem-safe, for the card filename.
+
+    Never truncated: it's the filename's only guarantee that two sessions don't collide onto one
+    card and overwrite each other. Codex ids are time-ordered UUIDv7 whose leading hex repeats
+    for sessions started within the same ~minute, so any fixed-length prefix would clash — only
+    the whole id is unique by construction. Claude's random uuids are safe either way; keeping
+    one rule for both sources keeps the seam clean (ADR-0014).
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "", session_id)
+    return safe or "unknown"
 
 
 def _relative(path: str, cwd: str) -> str:

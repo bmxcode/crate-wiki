@@ -268,7 +268,7 @@ def test_session_id_and_filename_come_from_session_meta(tmp_path, pinned_tz):
     assert card.session_id == SID
     # 14:00 UTC is 2026-07-20 00:00 local under the pinned UTC+10 zone.
     assert card.date == "2026-07-20"
-    assert card.filename() == "2026-07-20-019f92a0.md"
+    assert card.filename() == f"2026-07-20-{SID}.md"
 
 
 def test_a_resumed_segment_is_keyed_by_its_own_rollout_id_not_the_thread(tmp_path):
@@ -284,7 +284,7 @@ def test_a_resumed_segment_is_keyed_by_its_own_rollout_id_not_the_thread(tmp_pat
     ]
     card = parse(tmp_path, records)
     assert card.session_id == segment  # the per-file id, not the thread root
-    assert card.filename().endswith("-019f92a1.md")
+    assert card.filename() == f"{card.date}-{segment}.md"
 
 
 def test_two_segments_of_one_thread_become_two_cards(tmp_path):
@@ -311,6 +311,29 @@ def test_two_segments_of_one_thread_become_two_cards(tmp_path):
     assert len(written) == 2
     state = json.loads((target / ".crate" / "state.json").read_text())
     assert set(state["codex"]) == {thread, "019f92a1-5032-7fc1-ae66-6fe0b8c64c54"}
+
+
+def test_sessions_sharing_a_uuidv7_prefix_do_not_collide(tmp_path):
+    # Codex ids are time-ordered UUIDv7, so two sessions started within the same ~minute share
+    # their leading hex. The filename uses the full id (not a prefix) so they can't overwrite
+    # each other — the collision a truncated `<date>-<short id>.md` would have caused.
+    target = make_vault(tmp_path)
+    a = "019f92a0-aaaa-7000-8000-000000000000"
+    b = "019f92a0-bbbb-7000-8000-000000000000"  # same first 8 (019f92a0), different id
+    ra = cards.capture(
+        codex.parse,
+        write_session(tmp_path, [meta(id=a), msg("user", "A.")], "a.jsonl"),
+        target,
+        crate_version="0.1.0",
+    )
+    rb = cards.capture(
+        codex.parse,
+        write_session(tmp_path, [meta(id=b), msg("user", "B.")], "b.jsonl"),
+        target,
+        crate_version="0.1.0",
+    )
+    assert ra.card_path != rb.card_path
+    assert len(list((target / "raw" / "sessions" / "codex").glob("*.md"))) == 2
 
 
 def test_a_late_utc_session_is_dated_and_timed_by_local_day(tmp_path, pinned_tz):
@@ -368,7 +391,7 @@ def test_capture_writes_a_codex_card_under_its_own_dir(tmp_path, pinned_tz):
     )
 
     assert result.written
-    card = target / "raw" / "sessions" / "codex" / "2026-07-20-019f92a0.md"
+    card = target / "raw" / "sessions" / "codex" / f"2026-07-20-{SID}.md"
     assert card.is_file()
     assert "Hi." in card.read_text()
 

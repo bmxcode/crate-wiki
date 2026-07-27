@@ -345,7 +345,7 @@ def test_the_title_and_filename_lead_with_branch_and_date(tmp_path, pinned_tz):
     assert card.title == "d2-session-parser"
     # LINEAR's UTC timestamps land on 2026-07-20 local under the pinned UTC+10 zone.
     assert card.date == "2026-07-20"
-    assert card.filename() == "2026-07-20-9f3a1c2e.md"
+    assert card.filename() == "2026-07-20-9f3a1c2e-0000-0000-0000-000000000000.md"
 
 
 # --------------------------------------------------------------------------------------
@@ -368,7 +368,7 @@ def test_a_late_utc_session_is_dated_by_local_day_not_utc_day(tmp_path, pinned_t
     ]
     card = parse(tmp_path, records)
     assert card.date == "2026-07-20"
-    assert card.filename() == "2026-07-20-9f3a1c2e.md"
+    assert card.filename() == "2026-07-20-9f3a1c2e-0000-0000-0000-000000000000.md"
 
 
 def test_turn_timestamps_render_in_local_time_not_utc(tmp_path, pinned_tz):
@@ -443,7 +443,13 @@ def test_capture_writes_a_card_into_the_vault(tmp_path, pinned_tz):
 
     assert result.written
     # LINEAR's UTC timestamps land on 2026-07-20 local under the pinned UTC+10 zone.
-    card = target / "raw" / "sessions" / "claude-code" / "2026-07-20-9f3a1c2e.md"
+    card = (
+        target
+        / "raw"
+        / "sessions"
+        / "claude-code"
+        / "2026-07-20-9f3a1c2e-0000-0000-0000-000000000000.md"
+    )
     assert card.is_file()
     assert "Implement D2" in card.read_text()
 
