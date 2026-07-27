@@ -201,6 +201,33 @@ def test_developer_and_injected_user_messages_never_pose_as_prompts(tmp_path):
     assert "full access" not in rendered
 
 
+def test_replayed_agent_history_is_not_kept_as_a_prompt(tmp_path):
+    # On resume and after each approval, Codex replays the prior transcript back as a user-role
+    # message ("The following is the Codex agent history ..."). These are injected, often tens of
+    # KB each, and must never render as prompts — they bloated the resume-segment cards otherwise.
+    replay_added = "The following is the Codex agent history added since your last approval:\n" + (
+        "x " * 5000
+    )
+    replay_req = (
+        "The following is the Codex agent history whose request action you are completing:\n..."
+    )
+    records = [
+        meta(),
+        msg("user", "Please review the PR."),
+        msg("assistant", "Reviewing."),
+        msg("user", replay_added),
+        msg("user", replay_req),
+        msg("assistant", "Continuing."),
+    ]
+    card = parse(tmp_path, records)
+
+    assert [t.role for t in card.turns] == ["user", "assistant"]
+    assert card.turns[0].prose == "Please review the PR."
+    rendered = card.render()
+    assert "agent history" not in rendered
+    assert len(rendered) < 2000  # the multi-KB replay block is gone, not folded into a turn
+
+
 def test_reasoning_and_tool_output_bodies_are_dropped(tmp_path):
     records = [
         meta(),
@@ -311,6 +338,21 @@ def test_two_segments_of_one_thread_become_two_cards(tmp_path):
     assert len(written) == 2
     state = json.loads((target / ".crate" / "state.json").read_text())
     assert set(state["codex"]) == {thread, "019f92a1-5032-7fc1-ae66-6fe0b8c64c54"}
+
+
+def test_a_subagent_thread_is_not_captured_as_a_session(tmp_path):
+    # Codex's `guardian` auto-approver (and any multi-agent worker) runs as its own rollout file
+    # marked thread_source=subagent, linked to the primary by parent_thread_id. It's Codex's
+    # sidechain equivalent — pure machine chatter (approval decisions, replayed history), no user
+    # intent — so it must not become a card, the way the Claude adapter drops sidechains.
+    records = [
+        meta(thread_source="subagent", source={"subagent": {"other": "guardian"}}),
+        msg(
+            "user", "The following is the Codex agent history added since your last approval:\n..."
+        ),
+        msg("assistant", '{"risk_level":"low","outcome":"allow","rationale":"fine"}'),
+    ]
+    assert parse(tmp_path, records) is None
 
 
 def test_sessions_sharing_a_uuidv7_prefix_do_not_collide(tmp_path):

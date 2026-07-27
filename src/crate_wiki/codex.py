@@ -34,6 +34,12 @@ SOURCE = "codex"
 # a human, so it must never render as a prompt. `developer` messages are dropped wholesale (they
 # are always injected); for `user` messages the leading tag or header is the only signal, the
 # same way it is for Claude Code.
+#
+# The "agent history" prefix is the important one: on resume, and after each approval, Codex
+# replays the prior transcript back to the model as a *user*-role message (a resumed session is
+# a new rollout file, so it has to re-seed context). These are plain prose, not tagged, and can
+# be tens of kilobytes each — left in, they render as giant fake prompts and duplicate content
+# already captured in the parent segment's card.
 _INJECTED_PREFIXES = (
     "<environment_context",
     "<recommended_plugins",
@@ -47,6 +53,7 @@ _INJECTED_PREFIXES = (
     "# Files mentioned by the user",
     "## Additional Context",
     "## Code review guidelines",
+    "The following is the Codex agent history",
 )
 
 # A file operation inside an `apply_patch` envelope. The target path is not a JSON field — it
@@ -208,11 +215,21 @@ def _rollout_id(meta: dict) -> str:
 def parse(session: Path, *, crate_version: str) -> Card | None:
     """Parse a Codex session JSONL into a Card, or None if there's nothing usable in it."""
     records = cards._load_records(session)
+    meta = _meta(records)
+
+    # Subagent threads (Codex's `guardian` auto-approver, and any future multi-agent worker) are
+    # stored as their own rollout files, linked to the primary session by `parent_thread_id`.
+    # They are Codex's equivalent of Claude Code's sidechains, which the card model drops (ADR
+    # docs/architecture.md, the Keep/Drop/Collapse table): they carry no user intent, only
+    # machine chatter (approval decisions like `{"outcome":"allow"}`) and the parent transcript
+    # replayed back for the worker to read. Capturing one yields a card of pure noise, so skip it.
+    if meta.get("thread_source") == "subagent":
+        return None
+
     turns = _turns(records)
     if not turns:
         return None
 
-    meta = _meta(records)
     git = meta.get("git")
     git_branch = str(git.get("branch") or "") if isinstance(git, dict) else ""
     timestamps = [r["timestamp"] for r in records if r.get("timestamp")]

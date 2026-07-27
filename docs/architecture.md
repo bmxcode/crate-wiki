@@ -164,7 +164,7 @@ So the Claude adapter walks to the active leaf, discards dead branches, and emit
 | **Drop** | `tool_result` bodies, `thinking` blocks, dead branches |
 | **Collapse** | Sidechains (`isSidechain`) to one line per subagent |
 
-**Codex** (`~/.codex/sessions/<Y>/<M>/<D>/rollout-*.jsonl`) is the counter-example that proves the model generalizes: a flat append-only log with no tree, no rewinds, and no sidechains, where a command is a `function_call` and a file edit is an `apply_patch` whose path lives inside a patch string. Its adapter is a linear scan rather than a tree walk, keeps and drops the same *kinds* of thing, and emits the same card.
+**Codex** (`~/.codex/sessions/<Y>/<M>/<D>/rollout-*.jsonl`) is the counter-example that proves the model generalizes: a flat append-only log with no tree and no rewinds, where a command is a `function_call` and a file edit is an `apply_patch` whose path lives inside a patch string. Its adapter is a linear scan rather than a tree walk, keeps and drops the same *kinds* of thing, and emits the same card. The structure differs but the shape recurs — Codex resumes into a *new* file (so a card is keyed by the per-file rollout id, not the shared thread id), and its subagents (the `guardian` auto-approver) are their own files marked `thread_source: subagent`, the equivalent of Claude's sidechains and dropped the same way.
 
 The result is roughly a tenth the size and carries nearly all the signal — which is also what makes Tier 1 affordable.
 
