@@ -626,3 +626,59 @@ def test_discover_finds_rollouts_oldest_first(tmp_path):
 
 def test_discover_on_a_missing_dir_is_empty(tmp_path):
     assert codex.discover(tmp_path / "nope") == []
+
+
+# --------------------------------------------------------------------------------------
+# count_unswept — issue #35: has `capture_all` seen everything `discover()` finds, without
+# re-parsing a single rollout to check.
+# --------------------------------------------------------------------------------------
+
+
+def test_count_unswept_with_no_prior_sweep_counts_everything(tmp_path):
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-a.jsonl", [meta(id="a-session")])
+    write_rollout(sessions, "rollout-b.jsonl", [meta(id="b-session")])
+
+    assert codex.count_unswept(target, sessions_dir=sessions) == 2
+
+
+def test_count_unswept_is_zero_right_after_a_sweep(tmp_path):
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-a.jsonl", [meta(id="a-session"), msg("user", "Hi.")])
+    write_rollout(sessions, "rollout-b.jsonl", [meta(id="b-session"), msg("user", "Hi.")])
+
+    codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert codex.count_unswept(target, sessions_dir=sessions) == 0
+
+
+def test_count_unswept_counts_a_rollout_added_after_the_last_sweep(tmp_path):
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-a.jsonl", [meta(id="a-session"), msg("user", "Hi.")])
+    codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    write_rollout(sessions, "rollout-c.jsonl", [meta(id="c-session"), msg("user", "New.")])
+
+    assert codex.count_unswept(target, sessions_dir=sessions) == 1
+
+
+def test_count_unswept_treats_a_skipped_rollout_as_swept(tmp_path):
+    # A subagent thread is skipped by capture_all (never gets a card, never gets a `"codex"`
+    # cursor entry) but the sweep still looked at it — it must not show up as unswept forever.
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(
+        sessions, "rollout-guardian.jsonl", [meta(id="g-session", thread_source="subagent")]
+    )
+
+    codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert codex.count_unswept(target, sessions_dir=sessions) == 0
+
+
+def test_count_unswept_on_a_missing_sessions_dir_is_zero(tmp_path):
+    target = make_vault(tmp_path)
+    assert codex.count_unswept(target, sessions_dir=tmp_path / "does-not-exist") == 0

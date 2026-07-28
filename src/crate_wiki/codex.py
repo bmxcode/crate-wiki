@@ -259,6 +259,14 @@ def parse(session: Path, *, crate_version: str) -> Card | None:
 # --------------------------------------------------------------------------------------
 
 
+# A top-level `state.json` key, sibling to the per-session `"codex"` cursor `cards.write` keeps.
+# That one only gets an entry when a rollout actually yields a card, so a skipped rollout (a
+# subagent thread, one with nothing usable) never appears there — using it to answer "is anything
+# newer" would make every skipped rollout look permanently unswept. This tracks a different thing:
+# the newest rollout *path* a sweep looked at, regardless of what it did with it.
+_SWEPT_THROUGH = "codex_swept_through"
+
+
 @dataclass(frozen=True)
 class ScanSummary:
     """What one `capture_all` sweep did."""
@@ -281,6 +289,36 @@ def discover(sessions_dir: Path) -> list[Path]:
     if not sessions_dir.is_dir():
         return []
     return sorted(sessions_dir.rglob("rollout-*.jsonl"))
+
+
+def _record_sweep(vault_path: Path, rollouts: list[Path]) -> None:
+    """Remember the newest rollout path this sweep looked at, so `count_unswept` can tell what's
+    new without opening a file. `rollouts` is already sorted oldest-first, so the last entry is
+    the newest. An empty sweep leaves the prior cursor untouched — nothing newer to record."""
+    if not rollouts:
+        return
+    state_path = vault_path / ".crate" / "state.json"
+    state = cards._load_state(state_path)
+    state[_SWEPT_THROUGH] = str(rollouts[-1])
+    cards._write_state(state_path, state)
+
+
+def count_unswept(vault_path: Path, sessions_dir: Path | None = None) -> int:
+    """How many rollouts under `sessions_dir` are newer than the last `capture_all` sweep saw.
+
+    Path comparison against the cursor `_record_sweep` writes to `.crate/state.json` — never opens
+    a rollout, so this is cheap enough for `crate pending` to call on every invocation (ADR-0002,
+    ADR-0004). A vault that has never run a Codex sweep has no cursor, so everything discovered
+    counts as unswept. Read-only and best-effort: an invalid vault just yields no cursor rather
+    than raising, since this is a nudge, not an operation with something to protect.
+    """
+    sessions_dir = (sessions_dir or DEFAULT_SESSIONS_DIR).expanduser().resolve()
+    rollouts = discover(sessions_dir)
+    if not rollouts:
+        return 0
+    state = cards._load_state(vault_path / ".crate" / "state.json")
+    cursor = state.get(_SWEPT_THROUGH, "")
+    return sum(1 for rollout in rollouts if str(rollout) > cursor)
 
 
 def capture_all(
@@ -320,4 +358,5 @@ def capture_all(
         else:
             unchanged += 1
 
+    _record_sweep(vault_path, rollouts)
     return ScanSummary(len(rollouts), captured, unchanged, skipped)
