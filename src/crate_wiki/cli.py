@@ -293,12 +293,23 @@ def pending(
     show_all: Annotated[
         bool, typer.Option("--all", help="List ingested sources too, not just new ones.")
     ] = False,
+    sessions_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--sessions-dir",
+            help="Where Codex rollouts live. Defaults to ~/.codex/sessions.",
+        ),
+    ] = None,
 ) -> None:
     """List raw sources the wiki hasn't folded in yet.
 
     The ledger is the `sources:` frontmatter on wiki/sources/ pages, so this is idempotent by
     construction: ingest a source and it stops being listed. Private sections never appear
     (ADR-0006). Prints nothing and exits 0 when there's nothing to do.
+
+    Also nudges when Codex has rollouts newer than the last `/fetch-codex` sweep (issue #35):
+    unlike Claude Code, Codex has no Stop hook to capture it automatically, so this is the check
+    that stops one going unswept because nobody remembered to run it.
     """
     try:
         items = wiki.pending(vault_path, include_all=show_all)
@@ -309,6 +320,11 @@ def pending(
     # anything that isn't simply new gets its status appended.
     for item in items:
         typer.echo(item.path if item.status == "new" else f"{item.path}\t{item.status}")
+
+    resolved_vault = vault_path.expanduser().resolve()
+    unswept = codex.count_unswept(resolved_vault, sessions_dir=sessions_dir)
+    if unswept:
+        typer.echo(f"{unswept} Codex rollouts not yet swept — run /fetch-codex")
 
 
 @app.command()

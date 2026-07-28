@@ -20,6 +20,8 @@ crate pending --vault .
 
 $ARGUMENTS names a raw path to ingest. If it's empty, use the pending list: take the oldest entry, or ask me which if there are several and they look unrelated.
 
+A line reading `N Codex rollouts not yet swept` isn't a source to ingest — it means `/fetch-codex` hasn't been run since those sessions happened. Run `/fetch-codex` first, then come back to `/ingest`.
+
 Nothing pending, and no argument? Say so and stop. Don't go looking for work.
 
 Read the raw file. Read **only** that file. A `stale` marker means the source page exists but the raw file grew since — you'll be extending that page, not creating it, so read it too.

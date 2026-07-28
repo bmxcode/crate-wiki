@@ -768,19 +768,39 @@ def test_an_empty_title_is_refused(made):
 # --------------------------------------------------------------------------------------
 
 
-def test_pending_prints_a_bare_path_for_a_new_source(made):
-    result = runner.invoke(app, ["pending", "--vault", str(made)])
+# `--sessions-dir` points every test here at an empty tmp dir rather than the real
+# `~/.codex/sessions` `pending` defaults to — otherwise these tests' output would depend on
+# whatever Codex sessions happen to exist on the machine running them.
+
+
+def test_pending_prints_a_bare_path_for_a_new_source(made, tmp_path):
+    result = runner.invoke(
+        app, ["pending", "--vault", str(made), "--sessions-dir", str(tmp_path / "no-sessions")]
+    )
 
     assert result.exit_code == 0
     assert result.output.strip() == "raw/sessions/claude-code/2026-07-20-abcd1234.md"
 
 
-def test_pending_says_nothing_and_succeeds_when_there_is_nothing_to_do(made):
+def test_pending_says_nothing_and_succeeds_when_there_is_nothing_to_do(made, tmp_path):
     source_page(made)
-    result = runner.invoke(app, ["pending", "--vault", str(made)])
+    result = runner.invoke(
+        app, ["pending", "--vault", str(made), "--sessions-dir", str(tmp_path / "no-sessions")]
+    )
 
     assert result.exit_code == 0
     assert result.output.strip() == ""
+
+
+def test_pending_nudges_when_codex_has_unswept_rollouts(made, tmp_path):
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "rollout-a.jsonl").write_text("{}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["pending", "--vault", str(made), "--sessions-dir", str(sessions)])
+
+    assert result.exit_code == 0
+    assert "1 Codex rollouts not yet swept — run /fetch-codex" in result.output
 
 
 def test_the_cli_reports_a_bad_vault_rather_than_a_traceback(tmp_path):
