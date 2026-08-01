@@ -31,6 +31,11 @@ def _show_version(requested: bool) -> None:
         raise typer.Exit
 
 
+def _count(n: int, noun: str) -> str:
+    """`n` of `noun`, pluralized — for output lines that count two different things at once."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 @app.callback()
 def main(
     _version: bool = typer.Option(
@@ -168,9 +173,11 @@ def capture_codex(
     except vault.VaultError as error:
         raise _fail(error) from error
 
+    # Two units, so the line names them: a thread active on three days is one rollout and three
+    # cards (ADR-0015), and "scanned 1, captured 3" reads as a contradiction without the nouns.
     typer.echo(
-        f"scanned {summary.scanned}, captured {len(summary.captured)}, "
-        f"unchanged {summary.unchanged}, skipped {summary.skipped}"
+        f"scanned {_count(summary.scanned, 'rollout')}, skipped {summary.skipped}; "
+        f"captured {_count(len(summary.captured), 'card')}, unchanged {summary.unchanged}"
     )
     resolved_vault = vault_path.expanduser().resolve()
     for path in summary.captured:

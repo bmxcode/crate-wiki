@@ -1,6 +1,6 @@
 # ADR-0014 · A shared card core, with a thin adapter per session source
 
-**Status:** accepted · 2026-07-27
+**Status:** accepted · 2026-07-27 · `parse`'s signature amended by [ADR-0015](0015-a-day-of-a-thread-is-a-card.md)
 
 ## Context
 
@@ -69,3 +69,19 @@ not lost data.
 **The seam needs holding.** The temptation with each new source will be to reach back into
 `cards.py` for a source-specific tweak. The test is the same as ADR-0004's: if it's true of every
 source it belongs in the core, and if it's true of one it belongs in that adapter.
+
+## Amended by ADR-0015
+
+The contract above is unchanged in kind — a module with a `SOURCE` string and a plain `parse`
+function, no ABC — but `parse`'s signature is now
+`parse(session, *, crate_version) -> list[Card]`, and `cards.capture` returns a
+`list[CaptureResult]` to match. A Codex resume appends to the same rollout file, so one file is
+one thread that can run for weeks, and
+[ADR-0015](0015-a-day-of-a-thread-is-a-card.md) splits such a thread into one card per local day
+it was active on. `claude.py` still answers at most one card; the list is the general shape, and
+the empty list is what used to be `None`.
+
+That ADR is also the first real test of the sentence above, and the seam held: the day split, the
+per-day `session_meta` lookup and the day-boundary rule all live in `codex.py`, because they are
+facts about one on-disk format. What moved into `cards.py` is only what is true of every card —
+that a card's cursor is keyed by its session *and* its day.

@@ -9,7 +9,11 @@ tree to walk — reconstruction is a linear scan of the `response_item` records,
 things the Claude adapter keeps (intent, prose, files touched, commands) and discarding the
 same noise (reasoning, tool-result bodies, harness-injected context).
 
-See docs/adr/0014-shared-card-core-per-source-adapters.md and docs/architecture.md.
+One difference does survive into the card model: a Codex resume appends to the *same* rollout, so
+one file is one thread that can run for weeks — and a thread is split into one card per local day
+it was active on rather than one card for all of it. See
+docs/adr/0014-shared-card-core-per-source-adapters.md,
+docs/adr/0015-a-day-of-a-thread-is-a-card.md, and docs/architecture.md.
 """
 
 from __future__ import annotations
@@ -197,10 +201,10 @@ def _meta(records: list[dict]) -> dict:
     """The first `session_meta` payload — cwd, git, versions — or an empty dict if absent.
 
     A resumed file holds one of these per resume, all carrying the same ids but each carrying the
-    cwd, branch and `cli_version` current *at that resume*. Taking the first means a long-lived
-    thread reports the branch and version it started on. That, and the fact that such a card is
-    dated to its first day however many days it spans, are the known limitations of one-file-one-
-    card; they are a separate deliverable, not something to paper over here.
+    cwd, branch and `cli_version` current *at that resume*. This is the file's *header*, and only
+    the parts of it that can't drift are read from here: the thread's identity (`_rollout_id`)
+    and whether the whole file is a subagent thread. Everything that does drift is read per day
+    by `_by_day`, which tracks the meta in force at each day's end.
     """
     for record in records:
         if record.get("type") == "session_meta":
@@ -210,14 +214,16 @@ def _meta(records: list[dict]) -> dict:
 
 
 def _rollout_id(meta: dict) -> str:
-    """The id that identifies *this rollout file* — the card's identity.
+    """The id that identifies *this rollout file* — the thread's identity, shared by its cards.
 
     A Codex resume **appends to the same rollout file**, re-emitting an identical `session_meta`
     rather than starting a new file — checked against a real corpus rather than assumed, and a
     thread can be resumed into one file many times over (issue #32). So one rollout file is one
-    thread is one card, and `id` and `session_id` are two names for the same value on every user
-    segment; `id` is preferred only because the oldest rollouts predate `session_id` being
-    populated and leave it null, never the other way round.
+    thread, and `id` and `session_id` are two names for the same value on every user segment;
+    `id` is preferred only because the oldest rollouts predate `session_id` being populated and
+    leave it null, never the other way round. A thread is *not* one card — it is one card per day
+    it was active on (ADR-0015) — so every card the file yields carries this same id, and the
+    cursor keys on the id and the day together.
 
     `parent_thread_id` is *not* a resume link and must not be read as one. It is set only on
     subagent rollouts (the `guardian` auto-approver), pointing at the session that spawned them;
@@ -227,10 +233,106 @@ def _rollout_id(meta: dict) -> str:
     return str(meta.get("id") or meta.get("session_id") or "")
 
 
-def parse(session: Path, *, crate_version: str) -> Card | None:
-    """Parse a Codex session JSONL into a Card, or None if there's nothing usable in it."""
+# --------------------------------------------------------------------------------------
+# splitting a thread into its days — one card per local day the thread was active on
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _DaySlice:
+    """One local day of a rollout: its records, and the `session_meta` in force at its end."""
+
+    meta: dict
+    records: list[dict]
+
+
+def _day_key(timestamp, previous: str) -> str:
+    """The local calendar day a record belongs to, or `previous` when it can't be read.
+
+    Local wall clock, not UTC — the day boundary is the one the person who did the work lived
+    (ADR-0013), and `cards._local` is the same chokepoint `started`/`ended` and every turn stamp
+    already go through. A record whose timestamp is missing or unparseable inherits the day of
+    the record before it: the log is append-only and in order, so its neighbour is the best
+    available answer, and it keeps a file of unreadable timestamps as one card rather than
+    fragmenting it. Fail-quiet (ADR-0002) — nothing here raises on a bad value.
+    """
+    if not isinstance(timestamp, str) or not timestamp:
+        return previous
+    local = cards._local(timestamp)
+    return local[:10] if cards._parse_ts(local) is not None else previous
+
+
+def _by_day(records: list[dict]) -> list[_DaySlice]:
+    """A rollout's records grouped into the local days they happened on, oldest day first.
+
+    A Codex resume appends to the same file (see `_rollout_id`), so one rollout is one thread
+    that can span days — and a thread's account of Tuesday belongs on Tuesday, not on the day it
+    happened to start (ADR-0015). Grouping is by day *key* rather than by contiguous run, so a
+    clock-skewed record still lands in the day it names rather than splitting its day in two.
+    Order within a day stays file order, which is the order things happened. Records whose day
+    can't be read at all group under `""`, which sorts first and yields one card the way an
+    unreadable file did before the split.
+
+    Each day carries the last `session_meta` at or before that day's final record — cwd, branch
+    and `cli_version` as they were *that day*, since a resume re-emits a current one and the
+    branch in particular drifts across a long thread. Bounding the lookup at the day's own end
+    (rather than taking the file's last meta) is what keeps an earlier day's card byte-identical
+    when a later day is appended.
+    """
+    grouped: dict[str, list[dict]] = {}
+    metas: dict[str, dict] = {}
+    day = ""
+    meta: dict = {}
+
+    for record in records:
+        if record.get("type") == "session_meta":
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                meta = payload
+        day = _day_key(record.get("timestamp"), day)
+        grouped.setdefault(day, []).append(record)
+        metas[day] = meta
+
+    return [_DaySlice(metas[key], group) for key, group in sorted(grouped.items())]
+
+
+def _day_card(slice_: _DaySlice, turns: list[Turn], *, session_id: str, crate_version: str) -> Card:
+    """One day of a thread as a Card. Every field is a function of that day's records alone."""
+    git = slice_.meta.get("git")
+    git_branch = str(git.get("branch") or "") if isinstance(git, dict) else ""
+    timestamps = [r["timestamp"] for r in slice_.records if r.get("timestamp")]
+
+    return Card(
+        source=SOURCE,
+        session_id=session_id,
+        turns=turns,
+        started=cards._local(min(timestamps)) if timestamps else "",
+        ended=cards._local(max(timestamps)) if timestamps else "",
+        cwd=str(slice_.meta.get("cwd") or ""),
+        git_branch=git_branch,
+        tool_version=str(slice_.meta.get("cli_version") or ""),
+        crate_version=crate_version,
+        # The day's own record count, not the file's: a card's cursor has to move when *that
+        # day* gains records and stay put when another day does, or appending Wednesday would
+        # rewrite Monday's card on every sweep.
+        cursor=str(len(slice_.records)),
+        records=len(slice_.records),
+    )
+
+
+def parse(session: Path, *, crate_version: str) -> list[Card]:
+    """Parse a Codex rollout into one card per local day it was active on, oldest day first.
+
+    A resume appends to the same rollout file, so one file is one thread that can run for weeks
+    (`_rollout_id`). One card for all of it would be dated to the day the thread started and
+    invisible to `crate day` on every later day it touched — so the thread is split by day
+    instead (ADR-0015). Only days that carry actual conversation get a card: the test is the same
+    one a whole file already had to pass — the day's records must yield at least one turn — so a
+    dormant stretch between resumes, and a resume whose only content is replayed history, produce
+    nothing rather than an empty card. A file with nothing usable anywhere yields `[]`.
+    """
     records = cards._load_records(session)
-    meta = _meta(records)
+    header = _meta(records)
 
     # Subagent threads (Codex's `guardian` auto-approver, and any future multi-agent worker) are
     # stored as their own rollout files, linked to the session that spawned them by
@@ -239,30 +341,21 @@ def parse(session: Path, *, crate_version: str) -> Card | None:
     # docs/architecture.md, the Keep/Drop/Collapse table): they carry no user intent, only
     # machine chatter (approval decisions like `{"outcome":"allow"}`) and the parent transcript
     # replayed back for the worker to read. Capturing one yields a card of pure noise, so skip it.
-    if meta.get("thread_source") == "subagent":
-        return None
+    if header.get("thread_source") == "subagent":
+        return []
 
-    turns = _turns(records)
-    if not turns:
-        return None
-
-    git = meta.get("git")
-    git_branch = str(git.get("branch") or "") if isinstance(git, dict) else ""
-    timestamps = [r["timestamp"] for r in records if r.get("timestamp")]
-
-    return Card(
-        source=SOURCE,
-        session_id=_rollout_id(meta),
-        turns=turns,
-        started=cards._local(min(timestamps)) if timestamps else "",
-        ended=cards._local(max(timestamps)) if timestamps else "",
-        cwd=str(meta.get("cwd") or ""),
-        git_branch=git_branch,
-        tool_version=str(meta.get("cli_version") or ""),
-        crate_version=crate_version,
-        cursor=str(len(records)),
-        records=len(records),
-    )
+    session_id = _rollout_id(header)
+    parsed: list[Card] = []
+    for slice_ in _by_day(records):
+        # Split first, then parse: turns are built per day, so `_append_assistant` can never fold
+        # a Wednesday record onto a Tuesday turn and Tuesday's card never depends on what came
+        # after it.
+        turns = _turns(slice_.records)
+        if turns:
+            parsed.append(
+                _day_card(slice_, turns, session_id=session_id, crate_version=crate_version)
+            )
+    return parsed
 
 
 # --------------------------------------------------------------------------------------
@@ -280,7 +373,12 @@ _SWEPT_THROUGH = "codex_swept_through"
 
 @dataclass(frozen=True)
 class ScanSummary:
-    """What one `capture_all` sweep did."""
+    """What one `capture_all` sweep did.
+
+    `scanned` and `skipped` count *rollout files*; `captured` and `unchanged` count *cards*,
+    which is no longer the same number — a thread active on three days is one rollout and three
+    cards (ADR-0015).
+    """
 
     scanned: int
     captured: list[Path]
@@ -339,10 +437,12 @@ def capture_all(
 
     The vault is validated once up front (raises VaultError, same as `cards.capture` — this is
     the strict path a human runs, not the hook's fail-quiet one). Each rollout is then parsed and
-    written independently: a `None` parse (a subagent/guardian thread, or a file with nothing
+    written independently: an empty parse (a subagent/guardian thread, or a file with nothing
     usable) is skipped, not an error; any other exception from parsing or writing one rollout is
     also caught and counted as skipped, so one bad file among many can't abort the rest of the
-    sweep.
+    sweep. A rollout yields as many cards as it has active days, and each is written on its own
+    cursor — so a thread that gained a new day contributes one new card and leaves its earlier
+    days untouched.
     """
     vault_path = vault_path.expanduser().resolve()
     vault.load_config(vault_path)  # raises VaultError when it isn't a vault
@@ -355,19 +455,20 @@ def capture_all(
 
     for rollout in rollouts:
         try:
-            card = parse(rollout, crate_version=crate_version)
-            if card is None:
+            parsed = parse(rollout, crate_version=crate_version)
+            if not parsed:
                 skipped += 1
                 continue
-            result = cards.write(card, vault_path)
+            results = [cards.write(card, vault_path) for card in parsed]
         except Exception:  # noqa: BLE001 — one bad rollout must not abort the sweep
             skipped += 1
             continue
 
-        if result.written:
-            captured.append(result.card_path)
-        else:
-            unchanged += 1
+        for result in results:
+            if result.written:
+                captured.append(result.card_path)
+            else:
+                unchanged += 1
 
     _record_sweep(vault_path, rollouts)
     return ScanSummary(len(rollouts), captured, unchanged, skipped)
