@@ -40,11 +40,10 @@ DEFAULT_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 # are always injected); for `user` messages the leading tag or header is the only signal, the
 # same way it is for Claude Code.
 #
-# The "agent history" prefix is the important one: on resume, and after each approval, Codex
-# replays the prior transcript back to the model as a *user*-role message (a resumed session is
-# a new rollout file, so it has to re-seed context). These are plain prose, not tagged, and can
-# be tens of kilobytes each — left in, they render as giant fake prompts and duplicate content
-# already captured in the parent segment's card.
+# The "agent history" prefix is the important one: after each approval, and again on resume,
+# Codex replays the transcript so far back to the model as a *user*-role message. These are plain
+# prose, not tagged, and can be tens of kilobytes each — left in, they render as giant fake
+# prompts and repeat content this same card already holds from earlier in the file.
 _INJECTED_PREFIXES = (
     "<environment_context",
     "<recommended_plugins",
@@ -195,7 +194,14 @@ def _turns(records: list[dict]) -> list[Turn]:
 
 
 def _meta(records: list[dict]) -> dict:
-    """The first `session_meta` payload — cwd, git, versions — or an empty dict if absent."""
+    """The first `session_meta` payload — cwd, git, versions — or an empty dict if absent.
+
+    A resumed file holds one of these per resume, all carrying the same ids but each carrying the
+    cwd, branch and `cli_version` current *at that resume*. Taking the first means a long-lived
+    thread reports the branch and version it started on. That, and the fact that such a card is
+    dated to its first day however many days it spans, are the known limitations of one-file-one-
+    card; they are a separate deliverable, not something to paper over here.
+    """
     for record in records:
         if record.get("type") == "session_meta":
             payload = record.get("payload")
@@ -206,13 +212,17 @@ def _meta(records: list[dict]) -> dict:
 def _rollout_id(meta: dict) -> str:
     """The id that identifies *this rollout file* — the card's identity.
 
-    Codex resumes a session into a *new* file rather than appending, and in that new file
-    `session_meta.id` is the per-file id (it matches the filename and is unique) while
-    `session_meta.session_id` is the shared thread root the resume forked from (its
-    `parent_thread_id`). Keying the card on `session_id` would collapse every resume segment of
-    a thread onto one filename, so the last capture silently overwrites the rest. So the card is
-    keyed on `id` — one rollout file, one card, the way the Claude adapter treats one file. Older
-    rollouts carry only `id`; the oldest could in theory carry only `session_id`, so fall back.
+    A Codex resume **appends to the same rollout file**, re-emitting an identical `session_meta`
+    rather than starting a new file — checked against a real corpus rather than assumed, and a
+    thread can be resumed into one file many times over (issue #32). So one rollout file is one
+    thread is one card, and `id` and `session_id` are two names for the same value on every user
+    segment; `id` is preferred only because the oldest rollouts predate `session_id` being
+    populated and leave it null, never the other way round.
+
+    `parent_thread_id` is *not* a resume link and must not be read as one. It is set only on
+    subagent rollouts (the `guardian` auto-approver), pointing at the session that spawned them;
+    no user segment carries it. The field name invites the opposite reading, and the resume model
+    above is what makes it moot — see `parse`'s subagent skip.
     """
     return str(meta.get("id") or meta.get("session_id") or "")
 
@@ -223,7 +233,8 @@ def parse(session: Path, *, crate_version: str) -> Card | None:
     meta = _meta(records)
 
     # Subagent threads (Codex's `guardian` auto-approver, and any future multi-agent worker) are
-    # stored as their own rollout files, linked to the primary session by `parent_thread_id`.
+    # stored as their own rollout files, linked to the session that spawned them by
+    # `parent_thread_id` — the only rollouts that carry that field at all (see `_rollout_id`).
     # They are Codex's equivalent of Claude Code's sidechains, which the card model drops (ADR
     # docs/architecture.md, the Keep/Drop/Collapse table): they carry no user intent, only
     # machine chatter (approval decisions like `{"outcome":"allow"}`) and the parent transcript
