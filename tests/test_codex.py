@@ -300,55 +300,46 @@ def test_session_id_and_filename_come_from_session_meta(tmp_path, pinned_tz):
     assert card.filename() == f"2026-07-20-{SID}.md"
 
 
-def test_a_resumed_segment_is_keyed_by_its_own_rollout_id_not_the_thread(tmp_path):
-    # Codex resumes into a NEW file whose session_meta.id is the per-file id and whose
-    # session_id is the shared thread root it forked from. The card must key on `id`, or every
-    # resume segment of a thread would collide onto one filename and overwrite the last.
-    thread = "019f92a0-c0b5-7773-84ca-334c57776605"
-    segment = "019f92a1-5032-7fc1-ae66-6fe0b8c64c54"
+def test_a_resume_reuses_the_same_file_and_the_same_id(tmp_path):
+    # What a resume actually is (validated against a real corpus, issue #32): Codex appends an
+    # identical session_meta to the SAME rollout file rather than starting a new one, so a
+    # resumed thread is still one file, one id, one card — with the replayed history filtered
+    # and both halves of the work in it.
     records = [
-        meta(session_id=thread, id=segment, parent_thread_id=thread),
-        msg("user", "Continue where we left off."),
-        msg("assistant", "Resuming."),
+        meta(),
+        msg("user", "Part one.", ts="2026-07-19T14:03:00+10:00"),
+        # the resume: same ids, re-emitted
+        meta(ts="2026-07-19T16:00:00+10:00"),
+        msg("user", "The following is the Codex agent history…", ts="2026-07-19T16:00:00+10:00"),
+        msg("user", "Part two.", ts="2026-07-19T16:01:00+10:00"),
     ]
     card = parse(tmp_path, records)
-    assert card.session_id == segment  # the per-file id, not the thread root
-    assert card.filename() == f"{card.date}-{segment}.md"
+
+    assert card.session_id == SID
+    rendered = card.render()
+    assert "Part one." in rendered and "Part two." in rendered
+    assert "Codex agent history" not in rendered
+    assert [turn.prose for turn in card.turns] == ["Part one.", "Part two."]
 
 
-def test_two_segments_of_one_thread_become_two_cards(tmp_path):
-    # The regression the real data exposed: capturing both halves of a resumed session must not
-    # collapse them onto one card (which loses whichever is captured first).
-    target = make_vault(tmp_path)
-    thread = "019f92a0-c0b5-7773-84ca-334c57776605"
-
-    first = [meta(id=thread, session_id=thread), msg("user", "Part one.")]
-    second = [
-        meta(id="019f92a1-5032-7fc1-ae66-6fe0b8c64c54", session_id=thread, parent_thread_id=thread),
-        msg("user", "Part two."),
+def test_a_rollout_naming_no_session_id_falls_back_to_its_own_id(tmp_path):
+    # The oldest rollouts predate `session_id` being populated and leave it null. `id` is always
+    # there, which is why identity reads `id` first rather than the other way round.
+    records = [
+        env("session_meta", {"id": SID, "session_id": None, "cwd": "/home/me/repo/crate-wiki"}),
+        msg("user", "Hi."),
     ]
-    r1 = cards.capture(
-        codex.parse, write_session(tmp_path, first, "a.jsonl"), target, crate_version="0.1.0"
-    )
-    r2 = cards.capture(
-        codex.parse, write_session(tmp_path, second, "b.jsonl"), target, crate_version="0.1.0"
-    )
-
-    assert r1.written and r2.written
-    assert r1.card_path != r2.card_path, "each rollout segment gets its own card"
-    written = list((target / "raw" / "sessions" / "codex").glob("*.md"))
-    assert len(written) == 2
-    state = json.loads((target / ".crate" / "state.json").read_text())
-    assert set(state["codex"]) == {thread, "019f92a1-5032-7fc1-ae66-6fe0b8c64c54"}
+    assert parse(tmp_path, records).session_id == SID
 
 
 def test_a_subagent_thread_is_not_captured_as_a_session(tmp_path):
     # Codex's `guardian` auto-approver (and any multi-agent worker) runs as its own rollout file
-    # marked thread_source=subagent, linked to the primary by parent_thread_id. It's Codex's
+    # marked thread_source=subagent, linked to the session that spawned it by parent_thread_id —
+    # the only rollouts that carry that field, so it is never a resume link. It's Codex's
     # sidechain equivalent — pure machine chatter (approval decisions, replayed history), no user
     # intent — so it must not become a card, the way the Claude adapter drops sidechains.
     records = [
-        meta(thread_source="subagent", source={"subagent": {"other": "guardian"}}),
+        meta(parent_thread_id=SID, thread_source="subagent", source={"subagent": {"g": "guard"}}),
         msg(
             "user", "The following is the Codex agent history added since your last approval:\n..."
         ),
@@ -378,6 +369,8 @@ def test_sessions_sharing_a_uuidv7_prefix_do_not_collide(tmp_path):
     )
     assert ra.card_path != rb.card_path
     assert len(list((target / "raw" / "sessions" / "codex").glob("*.md"))) == 2
+    state = json.loads((target / ".crate" / "state.json").read_text())
+    assert set(state["codex"]) == {a, b}, "and the cursor tracks them as two sessions"
 
 
 def test_a_late_utc_session_is_dated_and_timed_by_local_day(tmp_path, pinned_tz):
@@ -570,28 +563,29 @@ def test_capture_all_is_idempotent(tmp_path):
     assert card_path.stat().st_mtime_ns >= stamp
 
 
-def test_capture_all_gives_a_resumed_thread_two_cards_in_one_sweep(tmp_path):
-    # The same regression test_two_segments_of_one_thread_become_two_cards covers for a single
-    # `cards.capture` call, exercised through a sweep of both segments at once.
+def test_a_thread_resumed_after_a_sweep_re_renders_its_one_card(tmp_path):
+    # A resume appends to the rollout the last sweep already captured, so the next sweep finds
+    # the same file longer than before: one card, re-rendered in place with the new work in it.
+    # (The cursor is the record count, so a grown file is never mistaken for an unchanged one.)
     target = make_vault(tmp_path)
     sessions = tmp_path / "sessions"
-    thread = "019f92a0-c0b5-7773-84ca-334c57776605"
-    segment = "019f92a1-5032-7fc1-ae66-6fe0b8c64c54"
-    write_rollout(
-        sessions, "rollout-1.jsonl", [meta(id=thread, session_id=thread), msg("user", "Part one.")]
-    )
-    write_rollout(
-        sessions,
-        "rollout-2.jsonl",
-        [meta(id=segment, session_id=thread, parent_thread_id=thread), msg("user", "Part two.")],
-    )
+    rollout = write_rollout(sessions, "rollout-1.jsonl", [meta(), msg("user", "Part one.")])
 
-    summary = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+    first = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+    assert len(first.captured) == 1
 
-    assert summary.scanned == 2
-    assert len(summary.captured) == 2
+    resumed = [meta(ts="2026-07-19T16:00:00+10:00"), msg("user", "Part two.")]
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(json.dumps(record) for record in resumed) + "\n")
+
+    second = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert second.scanned == 1
+    assert len(second.captured) == 1, "the resumed thread is re-rendered, not seen as unchanged"
+    assert second.captured[0] == first.captured[0], "and it is the same card, not a second one"
     written = list((target / "raw" / "sessions" / "codex").glob("*.md"))
-    assert len(written) == 2
+    assert len(written) == 1
+    assert "Part two." in written[0].read_text()
 
 
 def test_capture_all_on_a_missing_sessions_dir_is_an_empty_summary(tmp_path):
