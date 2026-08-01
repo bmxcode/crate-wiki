@@ -5,9 +5,10 @@ job is *discarding* noise, not converting a transcript. The shape of a card — 
 the assistant's prose, the files touched and commands run, the timings — is the same whatever
 tool produced the session. What differs is the on-disk format, and that lives in a per-source
 *adapter* (`claude.py`, `codex.py`), each a module exposing `SOURCE` and a
-`parse(session, *, crate_version) -> Card | None`. This module owns everything downstream of a
+`parse(session, *, crate_version) -> list[Card]`. This module owns everything downstream of a
 parsed `Card`: rendering, and the idempotent capture cursor. See
-docs/adr/0014-shared-card-core-per-source-adapters.md.
+docs/adr/0014-shared-card-core-per-source-adapters.md and
+docs/adr/0015-a-day-of-a-thread-is-a-card.md.
 """
 
 from __future__ import annotations
@@ -115,6 +116,17 @@ class Card:
         if self.cwd:
             return Path(self.cwd).name
         return _short(self.session_id)
+
+    @property
+    def state_key(self) -> str:
+        """This card's key in the capture cursor — the session *and* the day it covers.
+
+        A session id alone was enough while one session file meant one card. A Codex thread
+        resumed across days now yields one card per active day (ADR-0015), all sharing a session
+        id and differing only by date, so the id alone would collide and each day would silently
+        overwrite the last one's cursor. Same composite, and for the same reason, as `filename()`.
+        """
+        return f"{self.session_id}:{self.date}"
 
     def filename(self) -> str:
         return f"{self.date}-{_slug(self.session_id)}.md"
@@ -246,24 +258,26 @@ def _render_action(action: Action, cwd: str) -> str:
 # --------------------------------------------------------------------------------------
 
 
-def capture(parse, session: Path, vault_path: Path, *, crate_version: str) -> CaptureResult:
-    """Validate `session` and the vault, parse with `parse`, and write the resulting card.
+def capture(parse, session: Path, vault_path: Path, *, crate_version: str) -> list[CaptureResult]:
+    """Validate `session` and the vault, parse with `parse`, and write every card it yields.
 
-    `parse` is a source adapter's `parse(session, *, crate_version) -> Card | None`; everything
-    from a parsed Card on is source-agnostic, and lives in `write`. Raises VaultError on anything
-    the user must fix: a bad vault, a missing session file, or a session with nothing usable in
-    it. See `write` for the idempotent part of the contract.
+    `parse` is a source adapter's `parse(session, *, crate_version) -> list[Card]`; everything
+    from a parsed Card on is source-agnostic, and lives in `write`. One session file usually
+    means one card, but a Codex thread resumed across days is one card per day it was active on
+    (ADR-0015) — so the result is a list, in the same order the adapter returned, oldest first.
+    Raises VaultError on anything the user must fix: a bad vault, a missing session file, or a
+    session with nothing usable in it. See `write` for the idempotent part of the contract.
     """
     vault_path = vault_path.expanduser().resolve()
     vault.load_config(vault_path)  # raises VaultError when it isn't a vault
     if not session.is_file():
         raise vault.VaultError(f"no such session file: {session}")
 
-    card = parse(session, crate_version=crate_version)
-    if card is None:
+    parsed = parse(session, crate_version=crate_version)
+    if not parsed:
         raise vault.VaultError(f"no usable records in {session}")
 
-    return write(card, vault_path)
+    return [write(card, vault_path) for card in parsed]
 
 
 def write(card: Card, vault_path: Path) -> CaptureResult:
@@ -271,14 +285,16 @@ def write(card: Card, vault_path: Path) -> CaptureResult:
     a resolved, validated vault — this does no validation of its own, so a caller sweeping many
     cards into one vault (`codex.capture_all`) can validate once and call this per card.
 
-    Idempotent: the cursor in `.crate/state.json` is keyed by the card's source and session id, so
-    a Codex capture never touches Claude's cursor and vice versa. A re-run with an unchanged
-    cursor writes nothing; a resumed session (new cursor) re-renders its one card.
+    Idempotent: the cursor in `.crate/state.json` is keyed by the card's source and its
+    `state_key` (session id *and* day), so a Codex capture never touches Claude's cursor, and two
+    days of one resumed thread never overwrite each other's. A re-run with an unchanged cursor
+    writes nothing at all — the card isn't even opened; a session with new records re-renders the
+    card that day's records belong to, and only that one.
     """
     state_path = vault_path / ".crate" / "state.json"
     state = _load_state(state_path)
     source_state = state.setdefault(card.source, {})
-    prior = source_state.get(card.session_id)
+    prior = source_state.get(card.state_key)
 
     card_path = vault_path / "raw" / "sessions" / card.source / card.filename()
     if prior and prior.get("cursor") == card.cursor and card_path.is_file():
@@ -287,7 +303,7 @@ def write(card: Card, vault_path: Path) -> CaptureResult:
     card_path.parent.mkdir(parents=True, exist_ok=True)
     card_path.write_text(card.render(), encoding="utf-8")
 
-    source_state[card.session_id] = {"cursor": card.cursor, "records": card.records}
+    source_state[card.state_key] = {"cursor": card.cursor, "records": card.records}
     _write_state(state_path, state)
     return CaptureResult(card.session_id, card_path, written=True)
 

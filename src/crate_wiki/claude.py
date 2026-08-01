@@ -193,17 +193,23 @@ def _turns(live: list[dict]) -> list[Turn]:
     return turns
 
 
-def parse(session: Path, *, crate_version: str) -> Card | None:
-    """Parse a Claude Code session JSONL into a Card, or None if there's nothing usable in it."""
+def parse(session: Path, *, crate_version: str) -> list[Card]:
+    """Parse a Claude Code session JSONL into its cards — one, or none if nothing is usable.
+
+    The list is the adapter contract's general shape (ADR-0015): a session *file* holds whatever
+    cards it holds, and `codex.py` returns one per day a resumed thread was active on. Claude
+    Code sessions are not split — a transcript is walked to one live leaf and yields one card —
+    so this always answers at most one. The empty list is the old `None`.
+    """
     records = cards._load_records(session)
     live = _live_path(records)
     if not live:
-        return None
+        return []
 
     turns = _turns(live)
     timestamps = [r["timestamp"] for r in live if r.get("timestamp")]
 
-    return Card(
+    card = Card(
         source=SOURCE,
         session_id=cards._last(live, "sessionId"),
         turns=turns,
@@ -216,3 +222,4 @@ def parse(session: Path, *, crate_version: str) -> Card | None:
         cursor=live[-1].get("uuid", ""),
         records=len(records),
     )
+    return [card]

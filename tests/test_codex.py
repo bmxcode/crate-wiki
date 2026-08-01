@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from crate_wiki import cards, claude, codex, vault
+from crate_wiki import cards, claude, codex, vault, wiki
 
 # The cross-source capture test reuses the Claude suite's synthetic session; `pinned_tz` is a
 # shared fixture from conftest.py.
@@ -104,8 +104,31 @@ def write_session(tmp_path, records, name="rollout.jsonl"):
     return path
 
 
-def parse(tmp_path, records):
+def parse_days(tmp_path, records):
+    """Every card the rollout yields — one per local day it was active on (ADR-0015)."""
     return codex.parse(write_session(tmp_path, records), crate_version="0.1.0")
+
+
+def parse(tmp_path, records):
+    """The single card of a rollout that spans one day, or None when it yields nothing.
+
+    Most fixtures here are one day long, so they read better as one card. A fixture that spans
+    days uses `parse_days` and asserts on the list.
+    """
+    parsed = parse_days(tmp_path, records)
+    assert len(parsed) <= 1, "use parse_days for a rollout that spans more than one day"
+    return parsed[0] if parsed else None
+
+
+def capture_cards(path, target):
+    """Every CaptureResult writing `path` into `target` produced, oldest day first."""
+    return cards.capture(codex.parse, path, target, crate_version="0.1.0")
+
+
+def capture_one(path, target):
+    """The single CaptureResult a one-day rollout yields."""
+    (result,) = capture_cards(path, target)
+    return result
 
 
 # A straightforward linear Codex session used by several tests.
@@ -332,7 +355,7 @@ def test_a_rollout_naming_no_session_id_falls_back_to_its_own_id(tmp_path):
     assert parse(tmp_path, records).session_id == SID
 
 
-def test_a_subagent_thread_is_not_captured_as_a_session(tmp_path):
+def test_a_subagent_thread_yields_no_cards(tmp_path):
     # Codex's `guardian` auto-approver (and any multi-agent worker) runs as its own rollout file
     # marked thread_source=subagent, linked to the session that spawned it by parent_thread_id —
     # the only rollouts that carry that field, so it is never a resume link. It's Codex's
@@ -345,32 +368,26 @@ def test_a_subagent_thread_is_not_captured_as_a_session(tmp_path):
         ),
         msg("assistant", '{"risk_level":"low","outcome":"allow","rationale":"fine"}'),
     ]
-    assert parse(tmp_path, records) is None
+    assert parse_days(tmp_path, records) == []
 
 
-def test_sessions_sharing_a_uuidv7_prefix_do_not_collide(tmp_path):
+def test_sessions_sharing_a_uuidv7_prefix_do_not_collide(tmp_path, pinned_tz):
     # Codex ids are time-ordered UUIDv7, so two sessions started within the same ~minute share
     # their leading hex. The filename uses the full id (not a prefix) so they can't overwrite
     # each other — the collision a truncated `<date>-<short id>.md` would have caused.
     target = make_vault(tmp_path)
     a = "019f92a0-aaaa-7000-8000-000000000000"
     b = "019f92a0-bbbb-7000-8000-000000000000"  # same first 8 (019f92a0), different id
-    ra = cards.capture(
-        codex.parse,
-        write_session(tmp_path, [meta(id=a), msg("user", "A.")], "a.jsonl"),
-        target,
-        crate_version="0.1.0",
-    )
-    rb = cards.capture(
-        codex.parse,
-        write_session(tmp_path, [meta(id=b), msg("user", "B.")], "b.jsonl"),
-        target,
-        crate_version="0.1.0",
-    )
+    ra = capture_one(write_session(tmp_path, [meta(id=a), msg("user", "A.")], "a.jsonl"), target)
+    rb = capture_one(write_session(tmp_path, [meta(id=b), msg("user", "B.")], "b.jsonl"), target)
+
     assert ra.card_path != rb.card_path
     assert len(list((target / "raw" / "sessions" / "codex").glob("*.md"))) == 2
     state = json.loads((target / ".crate" / "state.json").read_text())
-    assert set(state["codex"]) == {a, b}, "and the cursor tracks them as two sessions"
+    # The cursor key is session id *and* day (ADR-0015); TS is 2026-07-19 under the pinned zone.
+    assert set(state["codex"]) == {f"{a}:2026-07-19", f"{b}:2026-07-19"}, (
+        "and the cursor tracks them as two sessions"
+    )
 
 
 def test_a_late_utc_session_is_dated_and_timed_by_local_day(tmp_path, pinned_tz):
@@ -385,6 +402,148 @@ def test_a_late_utc_session_is_dated_and_timed_by_local_day(tmp_path, pinned_tz)
     rendered = card.render()
     assert "· 09:30" in rendered  # 23:30 UTC + 10h
     assert "· 23:30" not in rendered
+
+
+# --------------------------------------------------------------------------------------
+# splitting a thread into its days (ADR-0015) — a resume appends to the same rollout, so one
+# file is one thread that can run for weeks. Each local day it was active on is its own card.
+# --------------------------------------------------------------------------------------
+
+
+def at(day, hhmm="09:00"):
+    """A timestamp on `day` in the pinned UTC+10 zone, so the local day is unambiguous."""
+    return f"{day}T{hhmm}:00+10:00"
+
+
+def day_one_two_three():
+    """A thread worked on across three local days, resumed into the same rollout each time.
+
+    Each resume re-emits a `session_meta` carrying the branch and CLI version current *then* —
+    the drift a single card, built from the first meta, would misreport.
+    """
+    return [
+        meta(ts=at("2026-07-19", "09:00")),
+        msg("user", "Day one work.", ts=at("2026-07-19", "09:00")),
+        exec_cmd("pytest -q", ts=at("2026-07-19", "09:30")),
+        # resumed the next day, on a new branch and a newer CLI
+        meta(ts=at("2026-07-20", "10:00"), git={"branch": "d36-day-two"}, cli_version="0.32.0"),
+        msg(
+            "user",
+            "The following is the Codex agent history whose request action you are completing:\n…",
+            ts=at("2026-07-20", "10:00"),
+        ),
+        msg("user", "Day two work.", ts=at("2026-07-20", "10:05")),
+        patch(("Update", "src/crate_wiki/codex.py"), ts=at("2026-07-20", "10:30")),
+        # and again the day after
+        meta(ts=at("2026-07-21", "11:00"), git={"branch": "d36-day-three"}, cli_version="0.33.0"),
+        msg("user", "Day three work.", ts=at("2026-07-21", "11:15")),
+        msg("assistant", "Shipped.", ts=at("2026-07-21", "11:20")),
+    ]
+
+
+def test_a_single_day_thread_yields_exactly_one_card(tmp_path, pinned_tz):
+    # The common case, and the one that must not change: a thread that never crossed midnight is
+    # one day and one card, the way it was before the split.
+    parsed = parse_days(tmp_path, LINEAR)
+
+    assert len(parsed) == 1
+    assert parsed[0].date == "2026-07-19"
+    assert parsed[0].records == len(LINEAR)
+
+
+def test_a_thread_resumed_twice_within_one_day_is_still_one_card(tmp_path, pinned_tz):
+    # Resumes are frequent and mostly same-day. The split is by *day*, not by resume, so three
+    # segments of one local day are one card with all three in it.
+    records = [
+        meta(ts=at("2026-07-19", "09:00")),
+        msg("user", "Segment one.", ts=at("2026-07-19", "09:00")),
+        meta(ts=at("2026-07-19", "13:00")),
+        msg("user", "Segment two.", ts=at("2026-07-19", "13:00")),
+        meta(ts=at("2026-07-19", "18:00")),
+        msg("user", "Segment three.", ts=at("2026-07-19", "18:00")),
+    ]
+    parsed = parse_days(tmp_path, records)
+
+    assert len(parsed) == 1
+    rendered = parsed[0].render()
+    for segment in ("Segment one.", "Segment two.", "Segment three."):
+        assert segment in rendered
+
+
+def test_a_thread_active_on_three_days_is_three_cards_each_with_that_days_metadata(
+    tmp_path, pinned_tz
+):
+    parsed = parse_days(tmp_path, day_one_two_three())
+
+    assert [c.date for c in parsed] == ["2026-07-19", "2026-07-20", "2026-07-21"]
+    assert all(c.session_id == SID for c in parsed), "one thread, so one id across its days"
+
+    # Each day carries the metadata in force *that* day, not the one the thread started on.
+    assert [c.git_branch for c in parsed] == ["d7-codex-parser", "d36-day-two", "d36-day-three"]
+    assert [c.tool_version for c in parsed] == ["0.31.0", "0.32.0", "0.33.0"]
+
+    # And each day's content and span is its own — no 3-day "duration", no other day's work.
+    assert [c.duration_min for c in parsed] == [30, 30, 20]
+    assert parsed[0].command_count == 1 and parsed[0].files == []
+    assert parsed[1].files == ["src/crate_wiki/codex.py"] and parsed[1].command_count == 0
+    assert "Day two work." in parsed[1].render()
+    assert "Day one work." not in parsed[1].render()
+    assert "Codex agent history" not in parsed[1].render()
+
+    # Three days, three filenames — `filename()` already carries the date, so nothing collides.
+    assert len({c.filename() for c in parsed}) == 3
+    assert parsed[2].filename() == f"2026-07-21-{SID}.md"
+
+
+def test_a_long_dormant_gap_cards_only_the_days_that_saw_work(tmp_path, pinned_tz):
+    # The reason `crate day` does not match on a card's *span*: a thread resumed after a long
+    # gap covers a stretch of calendar days that saw no work at all, and listing one card under
+    # every one of them would be worse than the bug it fixes. Only active days get a card.
+    records = [
+        meta(ts=at("2026-07-01", "09:00")),
+        msg("user", "Started this.", ts=at("2026-07-01", "09:00")),
+        meta(ts=at("2026-07-28", "14:00")),
+        msg("user", "Picked it back up.", ts=at("2026-07-28", "14:00")),
+    ]
+    parsed = parse_days(tmp_path, records)
+
+    assert [c.date for c in parsed] == ["2026-07-01", "2026-07-28"]
+
+
+def test_a_day_holding_only_a_resume_and_replayed_history_earns_no_card(tmp_path, pinned_tz):
+    # A resume that produced nothing — a `session_meta` and the transcript Codex replays back as
+    # a user message, which the injected-prefix filter drops. No turns, so no card: the same
+    # test a whole file already had to pass, applied per day.
+    records = [
+        meta(ts=at("2026-07-19", "09:00")),
+        msg("user", "Real work.", ts=at("2026-07-19", "09:00")),
+        meta(ts=at("2026-07-20", "10:00")),
+        msg(
+            "user",
+            "The following is the Codex agent history added since your last approval:\n…",
+            ts=at("2026-07-20", "10:00"),
+        ),
+    ]
+    parsed = parse_days(tmp_path, records)
+
+    assert [c.date for c in parsed] == ["2026-07-19"]
+
+
+def test_a_day_of_actions_with_no_user_prompt_still_earns_a_card(tmp_path, pinned_tz):
+    # Work done after a resume is work that happened that day, whether or not a fresh prompt was
+    # typed. Losing it is exactly the bug — a day with commands and edits gets its card.
+    records = [
+        meta(ts=at("2026-07-19", "09:00")),
+        msg("user", "Kick it off.", ts=at("2026-07-19", "09:00")),
+        meta(ts=at("2026-07-20", "10:00")),
+        exec_cmd("uv run pytest -q", ts=at("2026-07-20", "10:05")),
+        patch(("Update", "src/crate_wiki/cards.py"), ts=at("2026-07-20", "10:10")),
+    ]
+    parsed = parse_days(tmp_path, records)
+
+    assert [c.date for c in parsed] == ["2026-07-19", "2026-07-20"]
+    assert parsed[1].command_count == 1
+    assert parsed[1].files == ["src/crate_wiki/cards.py"]
 
 
 def test_an_unparseable_timestamp_does_not_crash(tmp_path):
@@ -404,8 +563,7 @@ def test_malformed_lines_are_skipped_not_fatal(tmp_path):
     good = json.dumps(msg("user", "keep me"))
     path.write_text(good + "\n{ this is not json\n", encoding="utf-8")
 
-    card = codex.parse(path, crate_version="0.1.0")
-    assert card is not None
+    (card,) = codex.parse(path, crate_version="0.1.0")
     assert "keep me" in card.render()
 
 
@@ -423,9 +581,7 @@ def make_vault(tmp_path):
 def test_capture_writes_a_codex_card_under_its_own_dir(tmp_path, pinned_tz):
     target = make_vault(tmp_path)
     records = [meta(ts="2026-07-19T14:00:00Z"), msg("user", "Hi.", ts="2026-07-19T14:00:00Z")]
-    result = cards.capture(
-        codex.parse, write_session(tmp_path, records), target, crate_version="0.1.0"
-    )
+    result = capture_one(write_session(tmp_path, records), target)
 
     assert result.written
     card = target / "raw" / "sessions" / "codex" / f"2026-07-20-{SID}.md"
@@ -437,12 +593,12 @@ def test_a_second_codex_capture_writes_nothing_new(tmp_path):
     target = make_vault(tmp_path)
     path = write_session(tmp_path, LINEAR)
 
-    first = cards.capture(codex.parse, path, target, crate_version="0.1.0")
+    first = capture_one(path, target)
     stamp = first.card_path.stat().st_mtime_ns
     marker = first.card_path.read_text() + "\nEDITED BY HAND\n"
     first.card_path.write_text(marker)  # prove the re-run doesn't touch it
 
-    second = cards.capture(codex.parse, path, target, crate_version="0.1.0")
+    second = capture_one(path, target)
     assert not second.written
     assert second.card_path.read_text() == marker
     assert second.card_path.stat().st_mtime_ns >= stamp
@@ -450,33 +606,31 @@ def test_a_second_codex_capture_writes_nothing_new(tmp_path):
 
 def test_a_resumed_codex_session_re_renders_the_same_card(tmp_path):
     target = make_vault(tmp_path)
-    cards.capture(codex.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+    capture_one(write_session(tmp_path, LINEAR), target)
 
     resumed = [*LINEAR, msg("user", "One more thing."), exec_cmd("git push")]
-    result = cards.capture(
-        codex.parse, write_session(tmp_path, resumed), target, crate_version="0.1.0"
-    )
+    result = capture_one(write_session(tmp_path, resumed), target)
 
-    assert result.written  # more records → a new cursor → the one card is re-rendered
+    assert result.written  # more records that day → a new cursor → the day's card is re-rendered
     text = result.card_path.read_text()
     assert "One more thing." in text
     assert "- run `git push`" in text
 
     written = list((target / "raw" / "sessions" / "codex").glob("*.md"))
-    assert len(written) == 1, "a resume updates the one card, it does not fragment"
+    assert len(written) == 1, "a same-day resume updates the one card, it does not fragment"
 
 
-def test_the_codex_cursor_is_the_record_count_under_its_own_source(tmp_path):
+def test_the_codex_cursor_is_the_record_count_under_its_own_source(tmp_path, pinned_tz):
     target = make_vault(tmp_path)
-    cards.capture(codex.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+    capture_one(write_session(tmp_path, LINEAR), target)
 
     state = json.loads((target / ".crate" / "state.json").read_text())
-    cursor = state["codex"][SID]
+    cursor = state["codex"][f"{SID}:2026-07-19"]
     assert cursor["cursor"] == str(len(LINEAR))
     assert cursor["records"] == len(LINEAR)
 
 
-def test_capturing_codex_does_not_disturb_the_claude_cursor(tmp_path):
+def test_capturing_codex_does_not_disturb_the_claude_cursor(tmp_path, pinned_tz):
     # Both sources into one vault: the state file keeps a block per source, and the cards land in
     # sibling directories. This is the whole point of D7 — a second front-end, no collision.
     target = make_vault(tmp_path)
@@ -487,8 +641,9 @@ def test_capturing_codex_does_not_disturb_the_claude_cursor(tmp_path):
 
     state = json.loads((target / ".crate" / "state.json").read_text())
     assert set(state) == {"claude-code", "codex"}
-    assert state["claude-code"]["9f3a1c2e-0000-0000-0000-000000000000"]["cursor"] == "a3"
-    assert state["codex"][SID]["cursor"] == str(len(LINEAR))
+    claude_key = "9f3a1c2e-0000-0000-0000-000000000000:2026-07-20"
+    assert state["claude-code"][claude_key]["cursor"] == "a3"
+    assert state["codex"][f"{SID}:2026-07-19"]["cursor"] == str(len(LINEAR))
 
     assert list((target / "raw" / "sessions" / "claude-code").glob("*.md"))
     assert list((target / "raw" / "sessions" / "codex").glob("*.md"))
@@ -586,6 +741,83 @@ def test_a_thread_resumed_after_a_sweep_re_renders_its_one_card(tmp_path):
     written = list((target / "raw" / "sessions" / "codex").glob("*.md"))
     assert len(written) == 1
     assert "Part two." in written[0].read_text()
+
+
+def test_a_sweep_writes_one_card_per_active_day_of_a_thread(tmp_path, pinned_tz):
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-1.jsonl", day_one_two_three())
+
+    summary = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert summary.scanned == 1, "scanned counts rollout files"
+    assert len(summary.captured) == 3, "captured counts cards"
+    assert sorted(p.name for p in summary.captured) == [
+        f"2026-07-19-{SID}.md",
+        f"2026-07-20-{SID}.md",
+        f"2026-07-21-{SID}.md",
+    ]
+
+
+def test_a_new_day_appended_adds_one_card_and_leaves_the_earlier_ones_untouched(
+    tmp_path, pinned_tz
+):
+    # The whole re-capture story: `raw/` is immutable in practice and a card already cited in a
+    # daily page's `sources:` must not move or change under it. Each day's cursor is that day's
+    # own record count, so appending Wednesday cannot disturb Monday or Tuesday.
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    two_days = day_one_two_three()[:7]  # everything before the day-three resume
+    rollout = write_rollout(sessions, "rollout-1.jsonl", two_days)
+
+    first = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+    assert len(first.captured) == 2
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in first.captured}
+
+    day_three = day_one_two_three()[7:]
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(json.dumps(record) for record in day_three) + "\n")
+
+    second = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert len(second.captured) == 1, "only the new day is written"
+    assert second.captured[0].name == f"2026-07-21-{SID}.md"
+    assert second.unchanged == 2, "and the two earlier days are recognised as already captured"
+    for path, (content, stamp) in before.items():
+        assert path.read_bytes() == content, f"{path.name} must stay byte-identical"
+        assert path.stat().st_mtime_ns == stamp, f"{path.name} must not even be reopened"
+    assert len(list((target / "raw" / "sessions" / "codex").glob("*.md"))) == 3
+
+
+def test_a_re_sweep_with_nothing_appended_writes_nothing_at_all(tmp_path, pinned_tz):
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-1.jsonl", day_one_two_three())
+
+    first = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in first.captured}
+
+    second = codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    assert second.captured == []
+    assert second.unchanged == 3
+    for path, (content, stamp) in before.items():
+        assert path.read_bytes() == content
+        assert path.stat().st_mtime_ns == stamp
+
+
+def test_crate_day_lists_a_split_thread_under_every_day_it_touched(tmp_path, pinned_tz):
+    # The bug, end to end (issue #37): one card for the whole thread was dated to day one, so
+    # `/daily` silently lost day two and day three — the failure ADR-0012 exists to prevent.
+    target = make_vault(tmp_path)
+    sessions = tmp_path / "sessions"
+    write_rollout(sessions, "rollout-1.jsonl", day_one_two_three())
+
+    codex.capture_all(target, crate_version="0.1.0", sessions_dir=sessions)
+
+    for day in ("2026-07-19", "2026-07-20", "2026-07-21"):
+        assert wiki.day_cards(target, day) == [f"raw/sessions/codex/{day}-{SID}.md"]
+    assert wiki.day_cards(target, "2026-07-22") == []
 
 
 def test_capture_all_on_a_missing_sessions_dir_is_an_empty_summary(tmp_path):

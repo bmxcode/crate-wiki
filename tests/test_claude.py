@@ -51,7 +51,14 @@ def write_session(tmp_path, records, name="session.jsonl"):
 
 
 def parse(tmp_path, records):
-    return claude.parse(write_session(tmp_path, records), crate_version="0.1.0")
+    """The one card in a session, or None.
+
+    `claude.parse` returns a list since ADR-0015 — the general shape of the adapter contract,
+    which `codex.py` uses to split a resumed thread by day. A Claude Code transcript is walked to
+    one live leaf and is never split, so the list holds at most one card and this unwraps it.
+    """
+    parsed = claude.parse(write_session(tmp_path, records), crate_version="0.1.0")
+    return parsed[0] if parsed else None
 
 
 # `pinned_tz` lives in conftest.py now — shared with the Codex suite.
@@ -415,8 +422,7 @@ def test_malformed_lines_are_skipped_not_fatal(tmp_path):
     good = json.dumps(rec("u1", None, "user", "keep me"))
     path.write_text(good + "\n{ this is not json\n", encoding="utf-8")
 
-    card = claude.parse(path, crate_version="0.1.0")
-    assert card is not None
+    (card,) = claude.parse(path, crate_version="0.1.0")
     assert "keep me" in card.render()
 
 
@@ -435,11 +441,15 @@ def make_vault(tmp_path):
     return target
 
 
+def capture_one(path, target):
+    """The single CaptureResult a Claude session yields — `cards.capture` returns a list now."""
+    (result,) = cards.capture(claude.parse, path, target, crate_version="0.1.0")
+    return result
+
+
 def test_capture_writes_a_card_into_the_vault(tmp_path, pinned_tz):
     target = make_vault(tmp_path)
-    result = cards.capture(
-        claude.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0"
-    )
+    result = capture_one(write_session(tmp_path, LINEAR), target)
 
     assert result.written
     # LINEAR's UTC timestamps land on 2026-07-20 local under the pinned UTC+10 zone.
@@ -458,13 +468,13 @@ def test_a_second_run_writes_nothing_new(tmp_path):
     target = make_vault(tmp_path)
     path = write_session(tmp_path, LINEAR)
 
-    first = cards.capture(claude.parse, path, target, crate_version="0.1.0")
+    first = capture_one(path, target)
     card = first.card_path
     stamp = card.stat().st_mtime_ns
     marker = card.read_text() + "\nEDITED BY HAND\n"
     card.write_text(marker)  # prove the re-run doesn't touch it
 
-    second = cards.capture(claude.parse, path, target, crate_version="0.1.0")
+    second = capture_one(path, target)
     assert not second.written
     assert card.read_text() == marker
     assert card.stat().st_mtime_ns >= stamp
@@ -473,7 +483,7 @@ def test_a_second_run_writes_nothing_new(tmp_path):
 def test_a_resumed_session_re_renders_the_same_card(tmp_path):
     target = make_vault(tmp_path)
 
-    cards.capture(claude.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+    capture_one(write_session(tmp_path, LINEAR), target)
 
     resumed = [
         *LINEAR,
@@ -486,9 +496,7 @@ def test_a_resumed_session_re_renders_the_same_card(tmp_path):
             timestamp="2026-07-19T15:22:00.000Z",
         ),
     ]
-    result = cards.capture(
-        claude.parse, write_session(tmp_path, resumed), target, crate_version="0.1.0"
-    )
+    result = capture_one(write_session(tmp_path, resumed), target)
 
     assert result.written
     text = result.card_path.read_text()
@@ -499,12 +507,14 @@ def test_a_resumed_session_re_renders_the_same_card(tmp_path):
     assert len(written) == 1, "a resume updates the one card, it does not fragment"
 
 
-def test_capture_records_the_cursor_under_its_source(tmp_path):
+def test_capture_records_the_cursor_under_its_source(tmp_path, pinned_tz):
     target = make_vault(tmp_path)
-    cards.capture(claude.parse, write_session(tmp_path, LINEAR), target, crate_version="0.1.0")
+    capture_one(write_session(tmp_path, LINEAR), target)
 
     state = json.loads((target / ".crate" / "state.json").read_text())
-    cursor = state["claude-code"]["9f3a1c2e-0000-0000-0000-000000000000"]
+    # The cursor key is session id *and* day (ADR-0015) — a Codex thread yields one card per day
+    # and the id alone would collide. LINEAR's UTC stamps are 2026-07-20 under the pinned zone.
+    cursor = state["claude-code"]["9f3a1c2e-0000-0000-0000-000000000000:2026-07-20"]
     assert cursor["cursor"] == "a3"
 
 
@@ -512,9 +522,9 @@ def test_capture_rewrites_a_deleted_card_even_if_the_cursor_matches(tmp_path):
     target = make_vault(tmp_path)
     path = write_session(tmp_path, LINEAR)
 
-    first = cards.capture(claude.parse, path, target, crate_version="0.1.0")
+    first = capture_one(path, target)
     first.card_path.unlink()
 
-    second = cards.capture(claude.parse, path, target, crate_version="0.1.0")
+    second = capture_one(path, target)
     assert second.written
     assert second.card_path.is_file()

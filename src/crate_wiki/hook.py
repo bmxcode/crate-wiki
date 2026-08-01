@@ -75,12 +75,14 @@ def capture_from_hook(
             _log(f"skip: no such transcript {source}", log_path=log_path)
             return
 
-        result = cards.capture(parse, source, vault_path, crate_version=crate_version)
-        rel = _display_path(result.card_path, vault_path)
-        if result.written:
-            _log(f"captured {result.session_id[:8]} -> {rel}", log_path=log_path)
-        else:
-            _log(f"{result.session_id[:8]} already captured, nothing new", log_path=log_path)
+        # One session usually means one card, but a Codex thread resumed across days is one card
+        # per day (ADR-0015), so this logs a line each rather than one line per session.
+        for result in cards.capture(parse, source, vault_path, crate_version=crate_version):
+            rel = _display_path(result.card_path, vault_path)
+            if result.written:
+                _log(f"captured {result.session_id[:8]} -> {rel}", log_path=log_path)
+            else:
+                _log(f"{result.session_id[:8]} already captured, nothing new", log_path=log_path)
     except Exception as error:  # noqa: BLE001 — the whole point is to catch everything
         _log(f"error: {type(error).__name__}: {error}", log_path=log_path)
 
