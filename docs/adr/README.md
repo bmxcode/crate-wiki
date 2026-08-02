@@ -19,6 +19,7 @@ One record per decision where a real alternative was rejected. If there was no a
 | [0014](0014-shared-card-core-per-source-adapters.md) | A shared card core, with a thin adapter per session source | Proving the abstraction (a second source) vs. branching in one module |
 | [0015](0015-a-day-of-a-thread-is-a-card.md) | A day of a thread is a card, not a thread | Splitting at capture vs. matching a card's span in `crate day` |
 | [0016](0016-a-rewind-re-renders-the-day-it-changed.md) | A rewind re-renders the day it changed | Re-rendering a card that may already be cited vs. freezing one that no longer matches |
+| [0017](0017-staleness-is-a-content-comparison.md) | Staleness is a content comparison, recorded on the page | A finer timestamp looks like the smaller fix, and doesn't fix it |
 
 0007 is deliberately unused: every work vault's `config.toml` reserves it for the record that would
 have to be written to reopen [ADR-0001](0001-local-only-work-vault.md) and give that vault a remote.
