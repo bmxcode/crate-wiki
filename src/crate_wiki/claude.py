@@ -6,8 +6,19 @@ rather than a transcript, so a flat read replays work that was abandoned by a re
 walk to the active leaf, drop the dead branches, keep the intent and the actions, and hand a
 `Card` to `cards.capture` — which owns everything downstream, shared with every other source.
 
+**A resume appends to the same file.** Checked against a real corpus rather than assumed
+(issue #39, and issue #32 for why this project does not design against an inferred format
+model): `sessionId` is constant within a file, no record's `parentUuid` points outside its own
+file, and the format carries no continuation-pointer field at all. So one JSONL file is one
+session that can run for days — and like a Codex thread it is split into one card per local day
+it was active on rather than one card dated to the day it started (ADR-0015). Unlike Codex's
+append-only log, the tree here can change *retroactively*: a rewind re-decides which records are
+live, including on a day already captured, and the day it changed is re-rendered (ADR-0016).
+
 See docs/adr/0002-free-capture-paid-synthesis.md, docs/adr/0004-deterministic-cli.md,
-docs/adr/0014-shared-card-core-per-source-adapters.md, and the "session parser" section of
+docs/adr/0014-shared-card-core-per-source-adapters.md,
+docs/adr/0015-a-day-of-a-thread-is-a-card.md,
+docs/adr/0016-a-rewind-re-renders-the-day-it-changed.md, and the "session parser" section of
 docs/architecture.md.
 """
 
@@ -193,33 +204,91 @@ def _turns(live: list[dict]) -> list[Turn]:
     return turns
 
 
-def parse(session: Path, *, crate_version: str) -> list[Card]:
-    """Parse a Claude Code session JSONL into its cards — one, or none if nothing is usable.
+# --------------------------------------------------------------------------------------
+# splitting a session into its days — one card per local day it was active on
+# --------------------------------------------------------------------------------------
 
-    The list is the adapter contract's general shape (ADR-0015): a session *file* holds whatever
-    cards it holds, and `codex.py` returns one per day a resumed thread was active on. Claude
-    Code sessions are not split — a transcript is walked to one live leaf and yields one card —
-    so this always answers at most one. The empty list is the old `None`.
+
+def _by_day(live: list[dict]) -> list[list[dict]]:
+    """The live path grouped into the local days it happened on, oldest day first.
+
+    A resume appends to the same file (see the module docstring), so one session can span days —
+    and a session's account of Tuesday belongs on Tuesday, not on the day it happened to start
+    (ADR-0015). The day boundary is `cards._day_key`, shared with the Codex adapter so both
+    sources cut at the same instant. Grouping is by day *key* rather than by contiguous run, so a
+    clock-skewed record lands in the day it names rather than splitting its day in two; order
+    within a day stays live-path order, which is the order things happened. Records whose day
+    can't be read at all group under `""`, which sorts first and yields one card the way an
+    unreadable file did before the split.
+
+    The input is the **live path**, not every record: a rewind's abandoned branch is not
+    conversation that survived, so a day whose records were all rewound away has no live
+    conversation on it and earns nothing (ADR-0016).
     """
-    records = cards._load_records(session)
-    live = _live_path(records)
-    if not live:
-        return []
+    grouped: dict[str, list[dict]] = {}
+    day = ""
+    for record in live:
+        day = cards._day_key(record.get("timestamp"), day)
+        grouped.setdefault(day, []).append(record)
+    return [group for _, group in sorted(grouped.items())]
 
-    turns = _turns(live)
-    timestamps = [r["timestamp"] for r in live if r.get("timestamp")]
 
-    card = Card(
+def _day_card(day: list[dict], turns: list[Turn], *, crate_version: str) -> Card:
+    """One day of a session as a Card. Every field is a function of that day's records alone.
+
+    That is the invariant the re-capture story rests on, and it is why the metadata reads the
+    day's slice rather than the whole live path: `cards._last` already takes the *last* value
+    ("the final state is the one worth recording"), and scoping it to the day is what stops a
+    later day's branch from reaching back into an earlier day's card.
+    """
+    timestamps = [r["timestamp"] for r in day if r.get("timestamp")]
+
+    return Card(
         source=SOURCE,
-        session_id=cards._last(live, "sessionId"),
+        session_id=cards._last(day, "sessionId"),
         turns=turns,
         started=cards._local(min(timestamps)) if timestamps else "",
         ended=cards._local(max(timestamps)) if timestamps else "",
-        cwd=cards._last(live, "cwd"),
-        git_branch=cards._last(live, "gitBranch"),
-        tool_version=cards._last(live, "version"),
+        cwd=cards._last(day, "cwd"),
+        git_branch=cards._last(day, "gitBranch"),
+        tool_version=cards._last(day, "version"),
         crate_version=crate_version,
-        cursor=live[-1].get("uuid", ""),
-        records=len(records),
+        # The uuid of the day's last live record, not the file's live leaf: a card's cursor has
+        # to move when *that day* changes and stay put when another day does, or appending
+        # Wednesday would rewrite Monday's card on every capture. A path through a tree is
+        # determined by its endpoint — each record has exactly one parent — so this one uuid
+        # identifies the day's whole slice, and therefore moves under a rewind that truncates
+        # the day as well as under an append that extends it (ADR-0016).
+        cursor=day[-1].get("uuid", ""),
+        # The day's own live records — what this card was actually built from.
+        records=len(day),
     )
-    return [card]
+
+
+def parse(session: Path, *, crate_version: str) -> list[Card]:
+    """Parse a Claude Code session into one card per local day it was active on, oldest first.
+
+    A resume appends to the same file, so one file is one session that can run for days. One card
+    for all of it would be dated to the day it started and invisible to `crate day` on every later
+    day it touched, so the session is split by day instead (ADR-0015). Only days that carry actual
+    conversation get a card: the test is the same one a whole file already had to pass — the day's
+    live records must yield at least one turn — so a day holding only tool results, or only a
+    rewind's abandoned branch, produces nothing rather than an empty card. A file with nothing
+    usable anywhere yields `[]`.
+
+    The split runs over the **live path**, which a rewind can re-decide retroactively — including
+    for a day already captured. That day's card is then re-rendered in place; it is never deleted
+    or renamed, because its path is `<date>-<session id>.md` and neither part can change under a
+    rewind (ADR-0016).
+    """
+    live = _live_path(cards._load_records(session))
+
+    parsed: list[Card] = []
+    for day in _by_day(live):
+        # Split first, then parse: turns are built per day, so `_turns` can never fold a
+        # Wednesday record onto a Tuesday turn and Tuesday's card never depends on what came
+        # after it.
+        turns = _turns(day)
+        if turns:
+            parsed.append(_day_card(day, turns, crate_version=crate_version))
+    return parsed

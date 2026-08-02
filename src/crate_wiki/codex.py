@@ -246,29 +246,15 @@ class _DaySlice:
     records: list[dict]
 
 
-def _day_key(timestamp, previous: str) -> str:
-    """The local calendar day a record belongs to, or `previous` when it can't be read.
-
-    Local wall clock, not UTC — the day boundary is the one the person who did the work lived
-    (ADR-0013), and `cards._local` is the same chokepoint `started`/`ended` and every turn stamp
-    already go through. A record whose timestamp is missing or unparseable inherits the day of
-    the record before it: the log is append-only and in order, so its neighbour is the best
-    available answer, and it keeps a file of unreadable timestamps as one card rather than
-    fragmenting it. Fail-quiet (ADR-0002) — nothing here raises on a bad value.
-    """
-    if not isinstance(timestamp, str) or not timestamp:
-        return previous
-    local = cards._local(timestamp)
-    return local[:10] if cards._parse_ts(local) is not None else previous
-
-
 def _by_day(records: list[dict]) -> list[_DaySlice]:
     """A rollout's records grouped into the local days they happened on, oldest day first.
 
     A Codex resume appends to the same file (see `_rollout_id`), so one rollout is one thread
     that can span days — and a thread's account of Tuesday belongs on Tuesday, not on the day it
-    happened to start (ADR-0015). Grouping is by day *key* rather than by contiguous run, so a
-    clock-skewed record still lands in the day it names rather than splitting its day in two.
+    happened to start (ADR-0015). The day boundary itself is `cards._day_key`, shared with the
+    Claude adapter so both sources cut a session at the same instant. Grouping is by day *key*
+    rather than by contiguous run, so a clock-skewed record still lands in the day it names
+    rather than splitting its day in two.
     Order within a day stays file order, which is the order things happened. Records whose day
     can't be read at all group under `""`, which sorts first and yields one card the way an
     unreadable file did before the split.
@@ -289,7 +275,7 @@ def _by_day(records: list[dict]) -> list[_DaySlice]:
             payload = record.get("payload")
             if isinstance(payload, dict):
                 meta = payload
-        day = _day_key(record.get("timestamp"), day)
+        day = cards._day_key(record.get("timestamp"), day)
         grouped.setdefault(day, []).append(record)
         metas[day] = meta
 

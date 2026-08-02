@@ -13,9 +13,14 @@ from typer.testing import CliRunner
 
 from crate_wiki import hook, vault
 from crate_wiki.cli import app
-from test_claude import LINEAR, write_session
+from test_claude import LINEAR, day_one_two_three, write_session
 
 runner = CliRunner()
+
+# Pinned for the same reason test_claude.py pins its whole module: a session is captured as one
+# card per *local* day (ADR-0015), so how many cards a shared fixture yields depends on the
+# timezone, and `LINEAR` straddles local midnight at a handful of real UTC offsets.
+pytestmark = pytest.mark.usefixtures("pinned_tz")
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +111,25 @@ def test_transcript_flag_captures_without_stdin(tmp_path):
 
     assert result.exit_code == 0
     assert len(list(card_dir(target).glob("*.md"))) == 1
+
+
+def test_a_multi_day_session_writes_a_card_and_logs_a_line_for_each_day(tmp_path):
+    # The Stop hook is the *only* automatic front door for Claude capture — Codex is swept by
+    # hand — so the multi-card contract has to hold here, not just in `cards.capture`. One
+    # session resumed across three days is three cards and three log lines (ADR-0015).
+    target = make_vault(tmp_path)
+    path = write_session(tmp_path, day_one_two_three())
+    payload = json.dumps({"transcript_path": str(path), "hook_event_name": "Stop"})
+
+    result = runner.invoke(app, ["capture", "claude", "--vault", str(target)], input=payload)
+
+    assert result.exit_code == 0
+    assert sorted(p.name[:10] for p in card_dir(target).glob("*.md")) == [
+        "2026-07-19",
+        "2026-07-20",
+        "2026-07-21",
+    ]
+    assert log_text(tmp_path).count("captured") == 3
 
 
 def test_a_second_capture_logs_already_and_does_not_duplicate(tmp_path):
