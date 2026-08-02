@@ -14,10 +14,11 @@ from crate_wiki.cli import app
 
 runner = CliRunner()
 
-# Staleness compares a raw file's mtime against its page's `updated:`, so a fixture that writes
-# the raw file *now* and dates the page in the past is stale the moment the real clock passes
-# that date. Pin both to the same fixed day instead: these tests are about the ledger, not about
-# what day it happens to be when they run.
+# Staleness compares a raw file's *content* against the digest its page recorded (#22), and falls
+# back to comparing mtime against `updated:` for pages written before `source_hash:` existed. The
+# fallback is why these fixtures still pin both to a fixed day rather than writing the raw file
+# *now* and dating the page in the past: that shape goes stale the moment the real clock passes
+# the date. These tests are about the ledger, not about what day it happens to be when they run.
 TODAY = "2026-07-20"
 RAW = "raw/sessions/claude-code/2026-07-20-abcd1234.md"
 
@@ -105,12 +106,72 @@ def test_private_sections_never_appear(made):
     assert all("journal" not in item.path for item in wiki.pending(made))
 
 
-def test_a_raw_file_newer_than_its_page_is_stale(made):
+def rewrite(target, text, day=TODAY):
+    """Change the raw card's *content*, keeping its mtime on `day`. What a resume does."""
+    raw = target / RAW
+    raw.write_text(text, encoding="utf-8")
+    touch(raw, day)
+
+
+def test_a_raw_file_rewritten_after_ingest_is_stale(made):
     """A resumed session rewrites its card, so an ingested source can outrun the page about it."""
     source_page(made)
+    rewrite(
+        made, "---\nsource: claude-code\n---\n\n# branch · 2026-07-20\n\nAnd more.\n", "2026-07-24"
+    )
+
+    assert [item.status for item in wiki.pending(made)] == ["stale"]
+
+
+def test_a_same_day_rewrite_is_stale(made):
+    # The bug (#22). The Stop hook rewrites a card continuously while its session runs, so the
+    # rewrite almost always lands on the day the page was ingested — and a day-granular
+    # comparison can never see it, because "2026-07-20" > "2026-07-20" is false.
+    source_page(made)
+    rewrite(made, "---\nsource: claude-code\n---\n\n# branch · 2026-07-20\n\nSecond half.\n")
+
+    assert [item.status for item in wiki.pending(made)] == ["stale"]
+
+
+def test_a_source_that_only_changed_mtime_is_not_stale(made):
+    # A fresh `git clone` gives every file the checkout time, which is newer than every page's
+    # `updated:` — so the old mtime comparison reported an entire vault as stale on a machine
+    # where nothing was wrong. ADR-0010 rejected mtime for `.crate/baseline.json` on exactly this
+    # reasoning; the ingest ledger just never got the same treatment.
+    source_page(made)
+    touch(made / RAW, "2027-01-01")
+
+    assert [item.status for item in wiki.pending(made, include_all=True)] == ["ingested"]
+
+
+def test_a_source_that_lost_content_is_stale(made):
+    # After ADR-0016 a rewind can make a card *shrink*, so an ingested page may describe work the
+    # source no longer holds. Staleness has to catch a source moving in either direction.
+    source_page(made)
+    rewrite(made, "---\nsource: claude-code\n---\n")
+
+    assert [item.status for item in wiki.pending(made)] == ["stale"]
+
+
+def test_a_page_with_no_recorded_hash_falls_back_to_the_mtime_check(made):
+    # Every page in every vault predating `source_hash:` is in this state. The fallback keeps
+    # their behaviour exactly as it was rather than silently reporting them all fresh, and the
+    # page upgrades itself the next time `crate extend --source` touches it.
+    page = source_page(made)
+    strip_source_hash(page)
     touch(made / RAW, "2026-07-24")
 
     assert [item.status for item in wiki.pending(made)] == ["stale"]
+
+
+def strip_source_hash(page):
+    """Drop the `source_hash:` line, leaving a page the way a pre-D21 vault wrote it."""
+    kept = [
+        line
+        for line in page.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("source_hash:")
+    ]
+    page.write_text("\n".join(kept) + "\n", encoding="utf-8")
 
 
 def test_all_lists_ingested_sources_without_calling_them_stale(made):
@@ -245,6 +306,93 @@ def test_a_source_already_listed_is_not_added_twice(made):
 
     sources = wiki.parse_list(wiki.read_frontmatter(page.read_text(encoding="utf-8"))["sources"])
     assert sources == (RAW,)
+
+
+def digests(target, title="Fake Session"):
+    """A page's `source_hash:` as `raw path -> digest`, read the way `pending` reads it."""
+    page = next(item for item in wiki.load_pages(target) if item.title == title)
+    return wiki.recorded_digests(page)
+
+
+def add_later_source(target, relative="raw/sessions/claude-code/later.md"):
+    """A second raw card, cited by the same page — the multi-source shape."""
+    (target / relative).write_text("---\nsource: claude-code\n---\n\n# later\n", encoding="utf-8")
+    touch(target / relative, TODAY)
+    wiki.extend_page(target, "Fake Session", source=relative, today=TODAY)
+    return relative
+
+
+def test_scaffolding_a_source_page_records_the_digest_it_read(made):
+    # Scaffolding with --raw already puts that path in the ingest ledger, so the state it was
+    # read in has to be recorded at the same moment or the page starts life unable to notice.
+    source_page(made)
+
+    assert digests(made) == {RAW: wiki.source_digest(made / RAW)}
+
+
+def test_extending_records_the_digest_of_the_source_it_absorbed(made):
+    source_page(made)
+    later = add_later_source(made)
+
+    assert digests(made) == {
+        RAW: wiki.source_digest(made / RAW),
+        later: wiki.source_digest(made / later),
+    }
+
+
+def test_only_the_source_that_changed_is_stale(made):
+    # A page can cite several raw files. The record is per source and self-describing, so one
+    # card moving on doesn't drag its neighbours into `stale` alongside it.
+    source_page(made)
+    add_later_source(made)
+    assert wiki.pending(made) == []
+
+    rewrite(made, "---\nsource: claude-code\n---\n\n# branch\n\nResumed.\n")
+
+    assert [(item.path, item.status) for item in wiki.pending(made)] == [(RAW, "stale")]
+
+
+def test_a_reordered_ledger_still_resolves_each_digest(made):
+    # The entries name their own path rather than sitting positionally alongside `sources:`, so
+    # hand-editing or reordering either list can't silently pair a path with another file's hash.
+    page = source_page(made)
+    add_later_source(made)
+    reverse_source_hash(page)
+
+    assert wiki.pending(made) == []
+
+
+def reverse_source_hash(page):
+    """Flip the order of the page's `source_hash:` entries, leaving `sources:` alone."""
+    lines = page.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("source_hash:"):
+            entries = reversed(wiki.parse_list(line.partition(":")[2]))
+            joined = ", ".join(f'"{entry}"' for entry in entries)
+            lines[index] = f"source_hash: [{joined}]"
+    page.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_re_extending_a_stale_source_records_its_new_state(made):
+    # Absorbing the rest of a resumed session is what clears `stale` — the recorded hash has to
+    # move forward with it, or the page stays permanently stale against work it has just read.
+    source_page(made)
+    rewrite(made, "---\nsource: claude-code\n---\n\n# branch\n\nSecond half.\n")
+    assert [item.status for item in wiki.pending(made)] == ["stale"]
+
+    wiki.extend_page(made, "Fake Session", source=RAW, today=TODAY)
+
+    assert wiki.pending(made) == []
+
+
+def test_a_wikilink_source_gets_no_digest_entry(made):
+    # A synthesis cites [[Page]], not a path. There's no file behind it to hash, and inventing
+    # an entry would put something in the ledger that can never resolve.
+    wiki.new_page(made, "concept", "Session Parser", today=TODAY)
+
+    path, _ = wiki.extend_page(made, "Session Parser", source="[[A]]", today="2026-07-24")
+
+    assert "source_hash" not in wiki.read_frontmatter(path.read_text(encoding="utf-8"))
 
 
 def test_extending_twice_reports_no_change_the_second_time(made):

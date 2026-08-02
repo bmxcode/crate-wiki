@@ -16,6 +16,7 @@ Two properties everything here holds to:
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -52,6 +53,7 @@ class Page:
     summary: str
     sources: tuple[str, ...]
     updated: str
+    source_hash: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,7 @@ def load_pages(vault: Path) -> list[Page]:
                     summary=fields.get("summary", ""),
                     sources=parse_list(fields.get("sources", "")),
                     updated=fields.get("updated", ""),
+                    source_hash=parse_list(fields.get("source_hash", "")),
                 )
             )
     return pages
@@ -197,7 +200,7 @@ def pending(vault: Path, *, include_all: bool = False) -> list[Pending]:
         page = claims.get(relative)
         if page is None:
             status = "new"
-        elif _is_stale(vault / relative, page):
+        elif _is_stale(vault / relative, relative, page):
             status = "stale"
         else:
             status = "ingested"
@@ -207,16 +210,67 @@ def pending(vault: Path, *, include_all: bool = False) -> list[Pending]:
     return results
 
 
-def _is_stale(raw: Path, page: Page) -> bool:
-    """Whether `raw` changed after the page that summarises it was last updated.
+def source_digest(raw: Path) -> str:
+    """A short content hash of a raw source, or `""` if it can't be read.
 
-    A session that resumes gets its card rewritten in place, so an ingested source can grow new
-    content. Comparing the raw file's mtime against the page's `updated:` date catches that. The
-    comparison is date-granular, so same-day changes don't show up — the honest limitation of
-    dating pages by day rather than timestamp.
+    Content, not mtime, for the reason ADR-0010 already gave once for `.crate/baseline.json`: a
+    `git checkout` rewrites every mtime in a vault, so a timestamp comparison reports a fresh
+    clone as entirely changed while nothing is wrong with it. Truncated to 12 hex characters
+    because this one is written into a page's frontmatter and read by a human in Obsidian — it
+    detects a rewrite, it does not defend against a forged one, and the baseline keeps the full
+    digest precisely because nothing reads that file by eye.
+
+    Unreadable degrades to `""`, which callers treat as "no answer" rather than "no change".
+    """
+    try:
+        return hashlib.sha256(raw.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return ""
+
+
+def recorded_digests(page: Page) -> dict[str, str]:
+    """What `page` recorded about the sources it was written from, as `raw path -> digest`.
+
+    Each `source_hash:` entry is self-describing — `"<raw path> <digest>"` — rather than
+    positional against `sources:`, so reordering or hand-editing either list can't silently pair
+    a path with another file's hash. Split on the *last* whitespace: `raw/` holds clips and
+    pasted documents as well as session cards, and those filenames can contain spaces.
+
+    An entry that names a path no longer in `sources:` is simply never looked up, and a malformed
+    entry is skipped — this reads a ledger, so it degrades rather than raising.
+    """
+    digests: dict[str, str] = {}
+    for entry in page.source_hash:
+        path, sep, digest = entry.strip().rpartition(" ")
+        if sep and path.strip() and digest.strip():
+            digests[_normalise(path)] = digest.strip()
+    return digests
+
+
+def _is_stale(raw: Path, relative: str, page: Page) -> bool:
+    """Whether `raw` changed after the page that summarises it was written.
+
+    Compared by **content**. A session that resumes gets its card rewritten in place, so an
+    ingested source can grow new content the same day it was ingested — and after ADR-0016 a
+    rewind can make a card *shrink*, so the page may describe work the source no longer holds. A
+    digest catches both; the day-granular mtime comparison below caught neither, since same-day
+    is the common case and the Stop hook rewrites a card continuously while its session runs.
+
+    **A page with no `source_hash:` entry for this file falls back to that mtime comparison.**
+    Every page in every vault predating this field is in that state, and the fallback keeps their
+    behaviour exactly as it was rather than silently reporting them all fresh; a page upgrades
+    itself the first time `crate extend --source` touches it. Backfilling was rejected — hashing
+    an already-ingested pair now would record whatever the card says *today* as the state that
+    was ingested, which writes the very bug this fixes into the ledger.
     """
     if not page.updated:
         return False
+
+    recorded = recorded_digests(page).get(_normalise(relative))
+    if recorded:
+        current = source_digest(raw)
+        return bool(current) and current != recorded
+
     try:
         touched = date.fromtimestamp(raw.stat().st_mtime).isoformat()
     except (OSError, ValueError, OverflowError):
@@ -377,14 +431,15 @@ def new_page(
         raise VaultError(f"{path} already exists — extend it rather than replacing it")
 
     stamp = today or date.today().isoformat()
-    text = _fill(template.read_text(encoding="utf-8"), title, raw, stamp)
+    digest = _digest_entry(vault, raw) if raw else ""
+    text = _fill(template.read_text(encoding="utf-8"), title, raw, stamp, digest)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
 
 
-def _fill(template: str, title: str, raw: str | None, today: str) -> str:
-    """Stamp the title, today's date and the source into a template.
+def _fill(template: str, title: str, raw: str | None, today: str, digest: str = "") -> str:
+    """Stamp the title, today's date, the source and its digest into a template.
 
     The templates carry literal `YYYY-MM-DD` and a placeholder H1 rather than `$` substitutions,
     so they stay readable as skeletons in Obsidian. Dates are only replaced inside the
@@ -394,6 +449,10 @@ def _fill(template: str, title: str, raw: str | None, today: str) -> str:
     (`["[[Source Page Name]]"]`) that reads as an example but would ship as a dead wikilink on
     every page — and "never link a page you haven't created" is the rule the whole link graph
     depends on. An empty list is honest; `crate extend` fills it.
+
+    `source_hash:` is rewritten the same way and for the same reason: scaffolding a source page
+    with `--raw` already puts that path in the ingest ledger, so the state it was read in has to
+    be recorded at the same moment or the page starts life unable to notice the card moving on.
     """
     lines = template.splitlines()
     in_frontmatter = bool(lines) and lines[0].strip() == "---"
@@ -409,6 +468,8 @@ def _fill(template: str, title: str, raw: str | None, today: str) -> str:
         if in_frontmatter:
             if line.startswith("sources:"):
                 line = f'sources: ["{raw}"]' if raw else "sources: []"
+            elif line.startswith("source_hash:"):
+                line = f'source_hash: ["{raw} {digest}"]' if digest else "source_hash: []"
             else:
                 line = line.replace("YYYY-MM-DD", today)
         elif not h1_done and line.startswith("# "):
@@ -429,12 +490,16 @@ def extend_page(
 ) -> tuple[Path, bool]:
     """Record that `title` absorbed new material. Returns the page and whether it changed.
 
-    Two mechanical edits, both of which the model otherwise makes by hand: `updated:` moves to
-    today, and `source` joins `sources:` if it isn't already there. `created:` is never touched.
+    Three mechanical edits, all of which the model otherwise makes by hand: `updated:` moves to
+    today, `source` joins `sources:` if it isn't already there, and `source_hash:` records what
+    that source looked like when it was read. `created:` is never touched.
 
     The `sources:` half is the one that matters. On a `wiki/sources/` page that field *is* the
     ingest ledger, so a malformed append silently breaks idempotency and the raw file comes back
     as pending forever — the failure the derived ledger exists to prevent, reintroduced by hand.
+    The hash is what makes `pending` able to say the source has moved on since (`_is_stale`); a
+    page whose frontmatter has no `source_hash:` key gets one inserted, so a vault written before
+    the field existed upgrades a page at a time as its sources are re-read.
     """
     path = find_page(vault, title)
     text = path.read_text(encoding="utf-8")
@@ -449,7 +514,10 @@ def extend_page(
     except StopIteration as error:
         raise VaultError(f"{path} has an unterminated frontmatter block") from error
 
+    digest = _digest_entry(vault, source) if source else ""
     changed = False
+    recorded = False
+
     for index in range(1, closing):
         key, sep, value = lines[index].partition(":")
         if not sep:
@@ -463,10 +531,49 @@ def extend_page(
                 joined = ", ".join(f'"{item}"' for item in (*existing, source))
                 lines[index] = f"sources: [{joined}]"
                 changed = True
+        elif key.strip() == "source_hash" and digest:
+            recorded = True
+            previous = parse_list(value)
+            merged = _merge_digest(previous, source, digest)
+            if merged != previous:
+                joined = ", ".join(f'"{item}"' for item in merged)
+                lines[index] = f"source_hash: [{joined}]"
+                changed = True
+
+    if digest and not recorded:
+        # The key is absent — a page scaffolded before this field existed. Insert it at the end
+        # of the frontmatter rather than refusing, so an old vault upgrades as it's used.
+        lines.insert(closing, f'source_hash: ["{source} {digest}"]')
+        changed = True
 
     if changed:
         path.write_text("\n".join(lines), encoding="utf-8")
     return path, changed
+
+
+def _digest_entry(vault: Path, source: str) -> str:
+    """The digest of `source` as a raw file, or `""` when it isn't one.
+
+    A `sources:` entry on a synthesis or a daily page is a `[[wikilink]]`, not a path, and there
+    is no file behind it to hash — those pages get no `source_hash:` entry, which is the same
+    answer `_normalise` already gives the ledger.
+    """
+    relative = _normalise(source)
+    if not relative.startswith("raw/"):
+        return ""
+    return source_digest(vault / relative)
+
+
+def _merge_digest(existing: tuple[str, ...], source: str, digest: str) -> tuple[str, ...]:
+    """`existing` with `source`'s entry replaced or appended, others left in place and in order.
+
+    Replaced rather than appended-to, because re-reading a source that has since changed has to
+    move its recorded hash forward — otherwise the page would stay permanently stale against a
+    source it has just absorbed.
+    """
+    target = _normalise(source)
+    kept = [e for e in existing if _normalise(e.rpartition(" ")[0]) != target]
+    return (*kept, f"{source} {digest}")
 
 
 def find_page(vault: Path, title: str) -> Path:

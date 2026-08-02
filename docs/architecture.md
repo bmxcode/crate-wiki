@@ -133,6 +133,8 @@ Two things fall out of that. `index.md` is **derived** — a page's one-line ent
 silently dropped from it. And "already ingested" is derived too: it's the union of `sources:` across
 `wiki/sources/` pages, which is why re-running `/ingest` can't duplicate work.
 
+A source doesn't stay ingested forever, though — the Stop hook rewrites a card in place while its session runs, and a rewind can even make one *shrink* ([ADR-0016](adr/0016-a-rewind-re-renders-the-day-it-changed.md)). So each page records the **content digest** of every raw file it was written from, in `source_hash:` beside `sources:`, and `crate pending` reports a source whose digest has moved as `stale` ([ADR-0017](adr/0017-staleness-is-a-content-comparison.md)). Content rather than mtime, for the reason [ADR-0010](adr/0010-conventions-file-and-upgrade-baseline.md) already gave once: `git checkout` rewrites every mtime in a vault, so a timestamp comparison calls a fresh clone entirely stale while nothing is wrong with it.
+
 The step in the middle is the one that isn't automatable at all. `/ingest` presents its takeaways and
 a page plan and then stops, before writing anything. Without that it's a summarizer.
 
