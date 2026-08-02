@@ -403,3 +403,24 @@ def _local(timestamp: str) -> str:
 def _hhmm(timestamp: str | None) -> str:
     parsed = _parse_ts(_local(timestamp)) if timestamp else None
     return parsed.strftime("%H:%M") if parsed else ""
+
+
+def _day_key(timestamp, previous: str) -> str:
+    """The local calendar day a record belongs to, or `previous` when it can't be read.
+
+    Local wall clock, not UTC — the day boundary is the one the person who did the work lived
+    (ADR-0013), and `_local` above is the same chokepoint `started`/`ended` and every turn stamp
+    already go through. A record whose timestamp is missing or unparseable inherits the day of the
+    record before it: records reach here in the order they happened, so the neighbour is the best
+    available answer, and it keeps a session of unreadable timestamps as one card rather than
+    fragmenting it. Fail-quiet (ADR-0002) — nothing here raises on a bad value.
+
+    This lives in the core rather than in an adapter because it is a rule about a *timestamp*, not
+    about a record shape: both sources split a session by day (ADR-0015, ADR-0016) and both must
+    draw the boundary in the same place. What stays per-adapter is the grouping itself — which
+    records are eligible, and what else each day has to carry (ADR-0014's seam).
+    """
+    if not isinstance(timestamp, str) or not timestamp:
+        return previous
+    local = _local(timestamp)
+    return local[:10] if _parse_ts(local) is not None else previous
