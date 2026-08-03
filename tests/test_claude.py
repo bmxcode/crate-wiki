@@ -25,7 +25,18 @@ SID = "9f3a1c2e-0000-0000-0000-000000000000"
 
 
 def rec(uuid, parent, role, content, **extra):
-    """One JSONL record. `content` is a string or a list of blocks."""
+    """One JSONL record. `content` is a string or a list of blocks.
+
+    `usage=` and `model=` (assistant records) land inside `message`, where Claude Code writes the
+    per-response token usage and the model that produced it — the source the token card reads.
+    """
+    message = {"role": role, "content": content}
+    if "usage" in extra:
+        message["usage"] = extra.pop("usage")
+    if "model" in extra:
+        message["model"] = extra.pop("model")
+    if "msg_id" in extra:
+        message["id"] = extra.pop("msg_id")
     record = {
         "uuid": uuid,
         "parentUuid": parent,
@@ -35,10 +46,20 @@ def rec(uuid, parent, role, content, **extra):
         "cwd": extra.pop("cwd", "/home/me/repo/crate-wiki"),
         "gitBranch": extra.pop("git_branch", "d2-session-parser"),
         "version": extra.pop("version", "1.0.83"),
-        "message": {"role": role, "content": content},
+        "message": message,
     }
     record.update(extra)
     return record
+
+
+def usage(input_=0, output=0, cache_read=0, cache_write=0):
+    """A Claude `message.usage` block — the four categories Anthropic reports disjoint."""
+    return {
+        "input_tokens": input_,
+        "output_tokens": output,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+    }
 
 
 def book(type_, uuid=None):
@@ -362,6 +383,155 @@ def test_frontmatter_carries_the_deterministic_rollup(tmp_path):
     assert "crate_version: 0.1.0" in rendered
     assert "files: [src/crate_wiki/session.py]" in rendered
     assert "commands: 1" in rendered
+
+
+# --------------------------------------------------------------------------------------
+# token usage — the day's spend, summed per category from each assistant record's message.usage
+# --------------------------------------------------------------------------------------
+
+
+def test_frontmatter_carries_per_category_token_usage_summed_over_the_day(tmp_path):
+    records = [
+        rec("u1", None, "user", "Do it.", timestamp=at("2026-07-19", "09:00")),
+        rec(
+            "a1",
+            "u1",
+            "assistant",
+            [{"type": "text", "text": "Sure."}],
+            timestamp=at("2026-07-19", "09:05"),
+            model="claude-opus-4-8",
+            usage=usage(input_=100, output=40, cache_read=900, cache_write=50),
+        ),
+        rec("t1", "a1", "user", [result("ok")], timestamp=at("2026-07-19", "09:06")),
+        rec(
+            "a2",
+            "t1",
+            "assistant",
+            [{"type": "text", "text": "Done."}],
+            timestamp=at("2026-07-19", "09:10"),
+            model="claude-opus-4-8",
+            usage=usage(input_=10, output=20, cache_read=1000),
+        ),
+    ]
+    card = parse(tmp_path, records)
+
+    # The four categories stay disjoint and are summed across the day's assistant responses.
+    assert card.usage == cards.Usage(
+        input=110, output=60, cache_read=1900, cache_write=50, model="claude-opus-4-8"
+    )
+    rendered = card.render()
+    assert "model: claude-opus-4-8" in rendered
+    assert "input_tokens: 110" in rendered
+    assert "output_tokens: 60" in rendered
+    assert "cache_read_tokens: 1900" in rendered
+    assert "cache_write_tokens: 50" in rendered
+
+
+def test_usage_is_summed_per_day_not_across_the_whole_session(tmp_path):
+    # A session resumed across days: each day's card must carry only that day's tokens, or the
+    # external per-client sum would count the whole session once per day it touched.
+    records = [
+        rec("u1", None, "user", "Day one.", timestamp=at("2026-07-19", "09:00")),
+        rec(
+            "a1",
+            "u1",
+            "assistant",
+            [{"type": "text", "text": "One."}],
+            timestamp=at("2026-07-19", "09:30"),
+            model="claude-opus-4-8",
+            usage=usage(input_=100, output=50),
+        ),
+        rec("u2", "a1", "user", "Day two.", timestamp=at("2026-07-20", "10:00")),
+        rec(
+            "a2",
+            "u2",
+            "assistant",
+            [{"type": "text", "text": "Two."}],
+            timestamp=at("2026-07-20", "10:30"),
+            model="claude-opus-4-8",
+            usage=usage(input_=7, output=3),
+        ),
+    ]
+    parsed = parse_days(tmp_path, records)
+
+    assert [c.date for c in parsed] == ["2026-07-19", "2026-07-20"]
+    assert parsed[0].usage == cards.Usage(100, 50, 0, 0, "claude-opus-4-8")
+    assert parsed[1].usage == cards.Usage(7, 3, 0, 0, "claude-opus-4-8")
+
+
+def test_one_response_split_across_records_sharing_a_message_id_counts_once(tmp_path):
+    # Verified against a real corpus (issue #44): Claude Code logs one API response across several
+    # assistant records that share a message.id, each repeating the same input/cache usage while
+    # output streams up. Summing per record double-counts; usage is folded per message.id (last
+    # record wins — final output, same input/cache), so the response is billed exactly once.
+    records = [
+        rec("u1", None, "user", "Do it.", timestamp=at("2026-07-19", "09:00")),
+        rec(
+            "a1a",
+            "u1",
+            "assistant",
+            [{"type": "text", "text": "Thinking"}],
+            timestamp=at("2026-07-19", "09:05"),
+            model="claude-opus-4-8",
+            msg_id="msg_ABC",
+            usage=usage(input_=100, output=10, cache_read=900, cache_write=50),
+        ),
+        rec(
+            "a1b",
+            "a1a",
+            "assistant",
+            [{"type": "text", "text": "Done."}],
+            timestamp=at("2026-07-19", "09:05"),
+            model="claude-opus-4-8",
+            msg_id="msg_ABC",  # same response, streamed further — output grew, input/cache same
+            usage=usage(input_=100, output=40, cache_read=900, cache_write=50),
+        ),
+    ]
+    card = parse(tmp_path, records)
+
+    # Counted once at the final usage, not 100+100 / 10+40.
+    assert card.usage == cards.Usage(100, 40, 900, 50, "claude-opus-4-8")
+
+
+def test_a_session_with_no_usage_data_renders_no_token_fields(tmp_path):
+    # LINEAR's assistant records carry no `message.usage` (an older session file). The card must
+    # render exactly as before — no zero-filled token rows — so `usage is None` is invisible.
+    card = parse(tmp_path, LINEAR)
+    assert card.usage is None
+    rendered = card.render()
+    assert "input_tokens" not in rendered
+    assert "model:" not in rendered
+
+
+def test_a_rewound_branch_is_not_billed_to_the_card(tmp_path):
+    # Usage sums the *live* path, matching every other card field: a rewound branch's tokens were
+    # billed but its work didn't survive, so the card shows the tokens of the conversation it shows.
+    records = [
+        rec("u1", None, "user", "Do it.", timestamp=at("2026-07-19", "09:00")),
+        # An abandoned branch off u1 with a huge usage that must never reach the card.
+        rec(
+            "dead",
+            "u1",
+            "assistant",
+            [{"type": "text", "text": "Wrong path."}],
+            timestamp=at("2026-07-19", "09:05"),
+            usage=usage(input_=999999, output=999999),
+        ),
+        # The live branch, also off u1 (the rewind), with the tokens that count.
+        rec(
+            "a1",
+            "u1",
+            "assistant",
+            [{"type": "text", "text": "Right path."}],
+            timestamp=at("2026-07-19", "09:10"),
+            model="claude-opus-4-8",
+            usage=usage(input_=100, output=50),
+        ),
+    ]
+    card = parse(tmp_path, records)
+
+    assert card.usage == cards.Usage(100, 50, 0, 0, "claude-opus-4-8")
+    assert "Wrong path." not in card.render()
 
 
 def test_the_title_and_filename_lead_with_branch_and_date(tmp_path, pinned_tz):

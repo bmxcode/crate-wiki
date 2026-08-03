@@ -98,6 +98,35 @@ def tool_output(text, ts=TS):
     )
 
 
+def token_count(input_=0, cached=0, output=0, reasoning=0, cache_write=0, ts=TS):
+    """An `event_msg` token_count record carrying the *cumulative* usage in `total_token_usage`.
+
+    This mirrors Codex's real telemetry, validated against a corpus (issue #44): the adapter reads
+    the cumulative `total_token_usage` (a day's spend is its rise across the day), not the per-turn
+    `last_token_usage` — which Codex emits in exact duplicate pairs, so summing it double-counts.
+    The numbers here are therefore cumulative-to-date. `input_` is OpenAI's *inclusive* prompt count
+    (it contains `cached` and `cache_write`), and `output` already *includes* `reasoning` — so
+    `total_tokens` is `input_ + output`, and the corpus confirms reasoning is not added on top. The
+    adapter subtracts the inclusive parts back into disjoint categories. A throwaway
+    `last_token_usage` is included too, to prove the adapter ignores it.
+    """
+    total = {
+        "input_tokens": input_,
+        "cached_input_tokens": cached,
+        "output_tokens": output,
+        "reasoning_output_tokens": reasoning,
+        "cache_write_input_tokens": cache_write,
+        "total_tokens": input_ + output,
+    }
+    info = {"total_token_usage": total, "last_token_usage": {"input_tokens": 999999}}
+    return env("event_msg", {"type": "token_count", "info": info}, ts)
+
+
+def turn_context(model, ts=TS):
+    """A top-level `turn_context` record naming the model in force — where Codex records it."""
+    return env("turn_context", {"model": model}, ts)
+
+
 def write_session(tmp_path, records, name="rollout.jsonl"):
     path = tmp_path / name
     path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
@@ -309,6 +338,114 @@ def test_frontmatter_carries_source_and_metadata(tmp_path):
     assert "crate_version: 0.1.0" in rendered
     assert "files: [src/crate_wiki/codex.py]" in rendered
     assert "commands: 1" in rendered
+
+
+def test_frontmatter_carries_per_category_token_usage(tmp_path):
+    records = [
+        meta(),
+        turn_context("gpt-5-codex"),
+        msg("user", "Do it."),
+        msg("assistant", "Sure."),
+        token_count(input_=1000, cached=900, output=40, reasoning=10),
+        msg("assistant", "Done."),
+        # cumulative after turn two; the day's usage is this final total minus a zero baseline
+        token_count(input_=1050, cached=900, cache_write=30, output=60, reasoning=10),
+    ]
+    card = parse(tmp_path, records)
+
+    # input_tokens *includes* the cached and cache-write portions, and output_tokens already
+    # includes reasoning — so the adapter splits input disjoint (1050-900-30=120) and takes output
+    # as-is (60), never adding the reasoning that's already inside it.
+    assert card.usage == cards.Usage(
+        input=120, output=60, cache_read=900, cache_write=30, model="gpt-5-codex"
+    )
+    rendered = card.render()
+    assert "model: gpt-5-codex" in rendered
+    assert "input_tokens: 120" in rendered
+    assert "output_tokens: 60" in rendered
+    assert "cache_read_tokens: 900" in rendered
+    assert "cache_write_tokens: 30" in rendered
+
+
+def test_usage_is_attributed_per_day_as_the_rise_in_the_cumulative_total(tmp_path, pinned_tz):
+    # The double-counting guard: `token_count` reports a *cumulative* total, so the adapter charges
+    # each day only its *rise* — a thread active on two days does not put its whole spend on each
+    # day's card and inflate the external per-client sum. Day two's cumulative continues day one's.
+    records = [
+        meta(ts=at("2026-07-19", "09:00")),
+        turn_context("gpt-5-codex", ts=at("2026-07-19", "09:00")),
+        msg("user", "Day one.", ts=at("2026-07-19", "09:00")),
+        msg("assistant", "One.", ts=at("2026-07-19", "09:05")),
+        token_count(input_=100, output=50, ts=at("2026-07-19", "09:05")),
+        meta(ts=at("2026-07-20", "10:00")),
+        turn_context("gpt-5-codex", ts=at("2026-07-20", "10:00")),
+        msg("user", "Day two.", ts=at("2026-07-20", "10:00")),
+        msg("assistant", "Two.", ts=at("2026-07-20", "10:05")),
+        token_count(input_=107, output=53, ts=at("2026-07-20", "10:05")),
+    ]
+    parsed = parse_days(tmp_path, records)
+
+    assert [c.date for c in parsed] == ["2026-07-19", "2026-07-20"]
+    assert parsed[0].usage == cards.Usage(100, 50, 0, 0, "gpt-5-codex")  # 100-0, 50-0
+    assert parsed[1].usage == cards.Usage(7, 3, 0, 0, "gpt-5-codex")  # 107-100, 53-50
+
+
+def test_duplicate_token_count_events_are_not_double_counted(tmp_path):
+    # Codex emits token_count events in exact duplicate pairs (verified against a real corpus,
+    # issue #44). Reading the cumulative total is immune: a duplicate repeats the value, so the
+    # day's rise is unchanged — where summing the per-turn block would have doubled it.
+    records = [
+        meta(),
+        turn_context("gpt-5-codex"),
+        msg("user", "Do it."),
+        msg("assistant", "Done."),
+        token_count(input_=100, output=50),
+        token_count(input_=100, output=50),  # exact duplicate, as Codex really emits
+    ]
+    card = parse(tmp_path, records)
+
+    assert card.usage == cards.Usage(100, 50, 0, 0, "gpt-5-codex")  # not 200 / 100
+
+
+def test_reasoning_tokens_are_not_added_to_output_they_are_already_inside_it(tmp_path):
+    # Verified against a real corpus (issue #44): total_tokens == input_tokens + output_tokens, so
+    # reasoning_output_tokens is a subset of output_tokens, not additive. Output is taken as-is.
+    records = [
+        meta(),
+        turn_context("gpt-5-codex"),
+        msg("user", "Think hard."),
+        msg("assistant", "Done."),
+        token_count(input_=10, output=100, reasoning=80),  # 80 of the 100 output are reasoning
+    ]
+    card = parse(tmp_path, records)
+
+    assert card.usage == cards.Usage(10, 100, 0, 0, "gpt-5-codex")  # output 100, not 180
+
+
+def test_a_thread_with_no_telemetry_renders_no_token_fields(tmp_path):
+    # LINEAR carries no `token_count` events (an older rollout, or one that logged none). The card
+    # renders exactly as before — no zero-filled rows — so a missing telemetry stream is invisible.
+    card = parse(tmp_path, LINEAR)
+    assert card.usage is None
+    rendered = card.render()
+    assert "input_tokens" not in rendered
+    assert "model:" not in rendered
+
+
+def test_an_older_token_count_layout_without_the_info_wrapper_is_still_read(tmp_path):
+    # Older rollouts put `total_token_usage` at the payload top level rather than under `info`; both
+    # layouts are read. Model falls back to "" when neither turn_context nor meta names one.
+    flat = env(
+        "event_msg",
+        {
+            "type": "token_count",
+            "total_token_usage": {"input_tokens": 30, "output_tokens": 5},
+        },
+    )
+    records = [meta(), msg("user", "Hi."), msg("assistant", "Hello."), flat]
+    card = parse(tmp_path, records)
+
+    assert card.usage == cards.Usage(30, 5, 0, 0, "")
 
 
 def test_session_id_and_filename_come_from_session_meta(tmp_path, pinned_tz):

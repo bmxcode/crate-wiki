@@ -27,7 +27,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from crate_wiki import cards
-from crate_wiki.cards import Action, Card, Turn
+from crate_wiki.cards import Action, Card, Turn, Usage
 
 SOURCE = "claude-code"
 
@@ -233,6 +233,57 @@ def _by_day(live: list[dict]) -> list[list[dict]]:
     return [group for _, group in sorted(grouped.items())]
 
 
+def _usage(day: list[dict]) -> Usage | None:
+    """The day's spend, summed over its live assistant *responses* — or None if none report it.
+
+    Each API response carries its own `message.usage`, and Anthropic reports the four categories
+    *disjoint* — `input_tokens` excludes both the cache-read and the cache-creation tokens — which
+    is exactly the shape `Usage` wants, so no normalisation is needed here (unlike Codex).
+
+    The catch, verified against a real corpus (issue #44): one response is often logged across
+    **several assistant records that share a `message.id`**, each repeating that response's usage
+    (input and cache identical, output growing as it streamed). Summing per record therefore
+    double-counts. So usage is folded per `message.id` — last record wins, which carries the final
+    output and the same input/cache as the rest — and only then summed across distinct responses.
+    `model` is the last assistant model on the day; a day's main thread rarely changes model, and
+    subagents (a different model) are sidechains dropped from the live path before this is reached.
+
+    Folded over the **live** path only, matching everything else on the card: a rewound branch's
+    tokens were billed but its work didn't survive, and attributing them to a day would break the
+    "every field is a function of that day's live records alone" invariant `_day_card` rests on.
+    So a card's tokens are the tokens of the conversation it shows — a small, documented undercount
+    when a day had heavy rewinds. Returns None when no record carried a `usage` block at all (an
+    older session file), so the card renders without the fields rather than as a row of zeros.
+    """
+    by_response: dict[str, dict] = {}  # message.id -> that response's usage (last record wins)
+    model = ""
+    for record in day:
+        if record.get("type") != "assistant":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        if message.get("model"):
+            model = str(message["model"])
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        # Fall back to the record uuid when a response carries no id, so an id-less record still
+        # counts once rather than collapsing every such record onto one key.
+        key = str(message.get("id") or record.get("uuid") or len(by_response))
+        by_response[key] = usage
+    if not by_response:
+        return None
+
+    input_ = output = cache_read = cache_write = 0
+    for usage in by_response.values():
+        input_ += cards._int(usage.get("input_tokens"))
+        output += cards._int(usage.get("output_tokens"))
+        cache_read += cards._int(usage.get("cache_read_input_tokens"))
+        cache_write += cards._int(usage.get("cache_creation_input_tokens"))
+    return Usage(input_, output, cache_read, cache_write, model)
+
+
 def _day_card(day: list[dict], turns: list[Turn], *, crate_version: str) -> Card:
     """One day of a session as a Card. Every field is a function of that day's records alone.
 
@@ -262,6 +313,7 @@ def _day_card(day: list[dict], turns: list[Turn], *, crate_version: str) -> Card
         cursor=day[-1].get("uuid", ""),
         # The day's own live records — what this card was actually built from.
         records=len(day),
+        usage=_usage(day),
     )
 
 
