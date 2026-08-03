@@ -26,6 +26,8 @@ Nothing pending, and no argument? Say so and stop. Don't go looking for work.
 
 Read the raw file. Read **only** that file. A `stale` marker means the source page exists but the raw file grew since — you'll be extending that page, not creating it, so read it too.
 
+A `live` marker means that card is the session you're in right now. It's still being written — every reply you make changes it, including this ingest — so a page written from it would be a partial record that reads as a complete one. Skip it, say that's why, and take the next entry. If `live` is the only thing pending, say so and stop; it'll be there, finished, once this session ends.
+
 ## Phase 2 — discuss, and then stop
 
 Read `index.md`. It's generated, one line per page, and it is your map of the wiki.

@@ -159,7 +159,7 @@ class Card:
         return f"{self.session_id}:{self.date}"
 
     def filename(self) -> str:
-        return f"{self.date}-{_slug(self.session_id)}.md"
+        return card_filename(self.session_id, self.date)
 
     def render(self) -> str:
         return _render_card(self)
@@ -402,6 +402,21 @@ def _slug(session_id: str) -> str:
     """
     safe = re.sub(r"[^A-Za-z0-9._-]", "", session_id)
     return safe or "unknown"
+
+
+def card_filename(session_id: str, day: str) -> str:
+    """The name of the card a session's `day` lands in: `<local day>-<full session id>.md`.
+
+    Public, and a function rather than only `Card.filename()`, because `wiki.pending` has to
+    answer "which raw file is the card of the session running right now?" without a `Card` in
+    hand — it works from paths on disk. Naming the rule once means the two can't drift, the same
+    reason `wiki.DIR_FOR_TYPE` derives its mapping instead of restating it.
+
+    Both halves are load-bearing: the day is what makes this a *card* rather than a session,
+    since one session resumed across days yields one card per day, all sharing an id (ADR-0015,
+    ADR-0016).
+    """
+    return f"{day}-{_slug(session_id)}.md"
 
 
 def _relative(path: str, cwd: str) -> str:
