@@ -17,11 +17,13 @@ Two properties everything here holds to:
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from crate_wiki.cards import card_filename
 from crate_wiki.vault import PAGE_TYPES, WIKI_DIRS, VaultError, load_config, template_text
 
 # PAGE_TYPES and WIKI_DIRS are parallel by construction in vault.py — `source` lives in
@@ -61,11 +63,9 @@ class Pending:
     """A raw file and where the wiki stands on it."""
 
     path: str  # vault-relative, posix
-    status: str  # new | stale (ingested, but the raw file changed since) | ingested
-
-    @property
-    def needs_work(self) -> bool:
-        return self.status != "ingested"
+    # new | stale (ingested, but the raw file changed since) | live (this session's own card,
+    # still being written) | ingested. One status per line: see `pending` for which wins.
+    status: str
 
 
 # --------------------------------------------------------------------------------------
@@ -192,8 +192,23 @@ def ingested(vault: Path) -> dict[str, Page]:
 
 
 def pending(vault: Path, *, include_all: bool = False) -> list[Pending]:
-    """Raw sources not yet ingested, plus any whose raw file has outrun its page."""
+    """Raw sources not yet ingested, plus any whose raw file has outrun its page.
+
+    A source that is the *running session's own card* is reported `live` instead of `new` or
+    `stale`. Those two say whether you should fold a source in; `live` says whether you usefully
+    can, and the answer is no either way — the Stop hook rewrites that card at every turn, so the
+    page you write is partial before you finish writing it, and ingesting it is itself what makes
+    it more partial. Nothing is lost by the relabel: the session ends, and the next run reports
+    the card as `stale` or `new` again.
+
+    It is a relabel and never a filter — **mark, don't hide**. A line printed today is still
+    printed, so a card you deliberately want anyway stays visible; silently omitting a file is
+    how a source goes un-ingested and nobody notices. For the same reason `live` does *not*
+    resurface an already-ingested, unchanged card: that line is hidden today and there is nothing
+    to do about it either way.
+    """
     claims = ingested(vault)
+    live = _live_card()
     results: list[Pending] = []
 
     for relative in _raw_files(vault, _public_sections(vault)):
@@ -205,9 +220,42 @@ def pending(vault: Path, *, include_all: bool = False) -> list[Pending]:
         else:
             status = "ingested"
 
+        if status != "ingested" and live and Path(relative).name == live:
+            status = "live"
+
         if include_all or status != "ingested":
             results.append(Pending(relative, status))
     return results
+
+
+def _live_card() -> str | None:
+    """The filename of the card the session running right now is still writing, or `None`.
+
+    **The day is part of the answer, not just the session id.** Since ADR-0015 and ADR-0016 one
+    session yields one card per local day it was active on, all sharing a session id and
+    differing only by date — so `CLAUDE_CODE_SESSION_ID` identifies the *session*, not the card.
+    Matching on the id alone would mark every day of a long-running session, including finished
+    days that are complete work and safe to ingest, and a source no operation will ever offer is
+    the failure `crate pending` exists to prevent. Only today's card is the one the next Stop
+    rewrites: a Stop writes records timestamped now, and those land on today's card whatever day
+    the session began.
+
+    A rewind can still re-render an *earlier* day's card (ADR-0016), and that day is deliberately
+    not marked. A rewind is occasional, has no marker in the transcript format, and when it does
+    land on an ingested day the content digest reports that card `stale` — which is the right and
+    actionable answer there, because that card has converged.
+
+    `CLAUDE_CODE_SESSION_ID` is a Claude Code implementation detail rather than a documented API,
+    so this **fails open** in every direction: unset, blank, or naming a card that doesn't exist
+    all mark nothing and leave the output exactly as it was. A future release that drops or
+    renames the variable degrades silently and correctly. Note there is also a
+    `CLAUDE_CODE_HOST_SESSION_ID`, which holds a *different* value and names no transcript — this
+    is the wrong one to reach for.
+    """
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if not session_id:
+        return None
+    return card_filename(session_id, date.today().isoformat())
 
 
 def source_digest(raw: Path) -> str:

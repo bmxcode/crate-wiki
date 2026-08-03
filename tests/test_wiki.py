@@ -191,6 +191,112 @@ def test_pending_on_a_directory_that_is_not_a_vault(tmp_path):
 
 
 # --------------------------------------------------------------------------------------
+# pending — the running session's own card
+# --------------------------------------------------------------------------------------
+#
+# A card of the session you're in is still being written, so `/ingest` can't usefully fold it in
+# — see wiki._live_card. Every filename here is built from `date.today()` and a synthetic id:
+# never a literal date, so CRATE_TEST_CLOCK passes too, and never a real session id, because this
+# repo's history is exposed retroactively.
+
+LIVE_ID = "11111111-2222-3333-4444-555555555555"
+OTHER_ID = "99999999-8888-7777-6666-555555555555"
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_session(monkeypatch):
+    """Unset the live-session signal for every test in this module.
+
+    The suite runs inside Claude Code as often as in CI, where the variable is genuinely set —
+    and a test that behaves differently depending on what launched it is the environment-dependent
+    flake `pinned_tz` and `CRATE_TEST_CLOCK` both exist for. Tests that want the signal set it.
+    """
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
+def session_card(target, session_id, *, day=None):
+    """A synthetic card, named the way the capture layer names one. Returns its relative path."""
+    day = day or date.today().isoformat()
+    relative = f"raw/sessions/claude-code/{day}-{session_id}.md"
+    path = target / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nsource: claude-code\n---\n\n# branch · {day}\n", encoding="utf-8")
+    touch(path, TODAY)
+    return relative
+
+
+def running(monkeypatch, session_id=LIVE_ID):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+
+
+def test_the_running_sessions_card_is_live(made, monkeypatch):
+    relative = session_card(made, LIVE_ID)
+    running(monkeypatch)
+
+    assert (relative, "live") in [(item.path, item.status) for item in wiki.pending(made)]
+
+
+def test_another_sessions_card_is_untouched(made, monkeypatch):
+    """Only the *current* session is detectable; a different session's card is just a source."""
+    relative = session_card(made, OTHER_ID)
+    running(monkeypatch)
+
+    assert (relative, "new") in [(item.path, item.status) for item in wiki.pending(made)]
+
+
+def test_an_earlier_days_card_of_the_running_session_is_not_live(made, monkeypatch):
+    # The day-split decision (ADR-0015/0016). One session yields one card per day it was active
+    # on, all sharing an id — so matching the id alone would mark finished days too, and a day of
+    # complete work that `/ingest` never offers is worse than the problem this fixes.
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    relative = session_card(made, LIVE_ID, day=yesterday)
+    running(monkeypatch)
+
+    assert (relative, "new") in [(item.path, item.status) for item in wiki.pending(made)]
+
+
+def test_live_wins_over_new(made, monkeypatch):
+    relative = session_card(made, LIVE_ID)
+    running(monkeypatch)
+
+    assert [item.status for item in wiki.pending(made) if item.path == relative] == ["live"]
+
+
+def test_live_wins_over_stale(made, monkeypatch):
+    """A live card is *always* stale — the Stop hook rewrites it every turn — and saying so is
+    noise, because you can't act on it until the session ends."""
+    relative = session_card(made, LIVE_ID)
+    source_page(made, title="Live Session", raw=relative)
+    (made / relative).write_text("---\nsource: claude-code\n---\n\nMore.\n", encoding="utf-8")
+    running(monkeypatch)
+
+    assert [item.status for item in wiki.pending(made) if item.path == relative] == ["live"]
+
+
+def test_an_ingested_card_is_not_resurfaced_by_being_live(made, monkeypatch):
+    """`live` relabels a line that would print anyway; it never adds one nobody can act on."""
+    relative = session_card(made, LIVE_ID)
+    source_page(made, title="Live Session", raw=relative)
+    running(monkeypatch)
+
+    assert [item.status for item in wiki.pending(made) if item.path == relative] == []
+
+
+def test_nothing_is_marked_when_the_signal_is_unset(made):
+    # Fail open: a plain shell, a Codex sweep, a future release that drops the variable. The check
+    # must never be the reason a card goes un-ingested.
+    session_card(made, LIVE_ID)
+    assert {item.status for item in wiki.pending(made)} == {"new"}
+
+
+def test_nothing_is_marked_when_the_signal_matches_no_card(made, monkeypatch):
+    session_card(made, LIVE_ID)
+    running(monkeypatch, "not-a-session-that-has-a-card")
+
+    assert {item.status for item in wiki.pending(made)} == {"new"}
+
+
+# --------------------------------------------------------------------------------------
 # new — scaffolding
 # --------------------------------------------------------------------------------------
 
