@@ -61,6 +61,32 @@ class Turn:
         return "\n\n".join(item for item in self.items if isinstance(item, str))
 
 
+@dataclass(frozen=True)
+class Usage:
+    """The token usage a card's day of work spent — the billing basis, kept per category.
+
+    Each category prices differently on a metered API, so they stay separate rather than folded
+    into one total: `input` and `output` are the uncached prompt and completion tokens, and
+    `cache_read`/`cache_write` are the cached-prompt and cache-creation tokens. Normalised to be
+    **disjoint** across both sources — `input` never includes what `cache_read` counts — so a
+    downstream cost calc is `input·rate_in + output·rate_out + …` with no double-counting,
+    whichever tool produced the session. `model` is the model the day's work ran on (the last one
+    seen, when a day mixed more than one); it's what selects the rate table. Every field is a
+    deterministic sum over the day's records — no judgment, no pricing — so this belongs in the
+    free tier (ADR-0002, ADR-0004). The dollar figure is derived outside the engine, from these.
+    """
+
+    input: int
+    output: int
+    cache_read: int
+    cache_write: int
+    model: str
+
+    @property
+    def total(self) -> int:
+        return self.input + self.output + self.cache_read + self.cache_write
+
+
 @dataclass
 class Card:
     """A parsed session, ready to render and to record in the capture cursor.
@@ -82,6 +108,10 @@ class Card:
     crate_version: str
     cursor: str  # the idempotency token for re-runs — see the class docstring
     records: int  # total records in the file, informational
+    # The day's token spend, or None when the source carried no usable usage data (an older
+    # session file, a Codex rollout with no telemetry). None renders as absent frontmatter, so a
+    # card without it is byte-identical to one from before usage existed.
+    usage: Usage | None = None
 
     # --- derived rollup (all deterministic) -------------------------------------------
 
@@ -209,6 +239,22 @@ def _render_card(card: Card) -> str:
         f"files: [{files}]",
         f"commands: {card.command_count}",
         f"subagents: {card.subagent_count}",
+    ]
+
+    if card.usage is not None:
+        # Flat scalar keys, not a nested map: the external cost-per-client reader (the engine
+        # doesn't do dollars — ADR-0002) parses these straight out of the frontmatter, and every
+        # existing key here is already flat. `model` selects the rate; the four counts are disjoint
+        # (see Usage) so a sum across cards never double-counts a cached token.
+        lines += [
+            f"model: {card.usage.model}",
+            f"input_tokens: {card.usage.input}",
+            f"output_tokens: {card.usage.output}",
+            f"cache_read_tokens: {card.usage.cache_read}",
+            f"cache_write_tokens: {card.usage.cache_write}",
+        ]
+
+    lines += [
         "---",
         "",
         f"# {card.title} · {card.date}",
@@ -375,6 +421,23 @@ def _relative(path: str, cwd: str) -> str:
 def _oneline(text: str) -> str:
     """Collapse a command to a single line so it renders as one list item."""
     return " ".join(text.split())
+
+
+def _int(value) -> int:
+    """A token count coerced to a non-negative int, or 0 for anything unreadable.
+
+    Usage numbers come straight from another tool's JSON, where a field can be missing, null, or
+    (rarely) a float. Capture is fail-quiet (ADR-0002): a bad count contributes 0 rather than
+    aborting the card. Negatives are clamped — a token count is never negative, and letting one
+    through would silently understate a day's spend in the external cost sum.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; a flag is not a count
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, float):
+        return max(int(value), 0)
+    return 0
 
 
 def _parse_ts(timestamp: str) -> datetime | None:

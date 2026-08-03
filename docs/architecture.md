@@ -162,7 +162,7 @@ So the Claude adapter walks to the active leaf, discards dead branches, and emit
 
 | | |
 |---|---|
-| **Keep** | Your prompts verbatim (the intent), assistant prose, files touched (from `Edit`/`Write` params), commands run, git branch, timings |
+| **Keep** | Your prompts verbatim (the intent), assistant prose, files touched (from `Edit`/`Write` params), commands run, git branch, timings, the day's token usage |
 | **Drop** | `tool_result` bodies, `thinking` blocks, dead branches |
 | **Collapse** | Sidechains (`isSidechain`) to one line per subagent |
 
@@ -173,6 +173,8 @@ So the Claude adapter walks to the active leaf, discards dead branches, and emit
 Each day's cursor is that day's own — Codex's record count, Claude's last live-path uuid — so appending Wednesday writes Wednesday's card and leaves Monday's and Tuesday's byte-identical and unopened, which is what `raw/` being immutable requires. **Where the two sources genuinely differ is what can happen to a day already captured.** Codex's log only grows, so an earlier day's slice can never change. Claude Code's tree can be re-decided retroactively: the live path is recomputed over the whole file every time, so a rewind to a point before midnight shortens a day that was already carded. That day's card is then re-rendered in place — never deleted, never renamed, since its path is `<date>-<session id>.md` and neither part moves — and a day left with no live records at all yields nothing, leaving its earlier card on disk, stale but intact. [ADR-0016](adr/0016-a-rewind-re-renders-the-day-it-changed.md) is why re-rendering beat freezing.
 
 The result is roughly a tenth the size and carries nearly all the signal — which is also what makes Tier 1 affordable.
+
+Each card also records **the day's token usage** — input, output, and cache read/write kept separate, with the model — summed deterministically from each source's own usage records (Claude's `message.usage`, Codex's `token_count` telemetry) and normalised to one disjoint shape across both. The engine stops at tokens: turning them into a dollar cost needs a rate table that ages and, on a subscription plan, is notional, so that stays an external reader over the frontmatter, holding the team's own rates and repo-to-client map ([ADR-0018](adr/0018-tokens-are-captured-cost-is-external.md)).
 
 A `state.json` cursor tracks what's already been captured, keyed per source and then by session id *and* day, so the hook can run on every session and stay idempotent — a Codex capture never disturbs Claude's cursor, and two days of one resumed thread never overwrite each other's.
 

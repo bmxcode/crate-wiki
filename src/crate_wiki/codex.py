@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from crate_wiki import cards, vault
-from crate_wiki.cards import Action, Card, Turn
+from crate_wiki.cards import Action, Card, Turn, Usage
 
 SOURCE = "codex"
 
@@ -282,8 +282,130 @@ def _by_day(records: list[dict]) -> list[_DaySlice]:
     return [_DaySlice(metas[key], group) for key, group in sorted(grouped.items())]
 
 
-def _day_card(slice_: _DaySlice, turns: list[Turn], *, session_id: str, crate_version: str) -> Card:
-    """One day of a thread as a Card. Every field is a function of that day's records alone."""
+# The token fields a Codex usage block carries. Validated against a real corpus (issue #44): every
+# `token_count` event's `info` holds a `total_token_usage` (cumulative for the whole thread) and a
+# `last_token_usage` (the last turn), each with these keys. `cache_write_input_tokens` is present in
+# newer rollouts and was uniformly 0 in the corpus (OpenAI does not bill cache writes), but it is
+# read rather than assumed 0 so the number stays honest if that ever changes.
+_USAGE_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "cache_write_input_tokens",
+    "total_tokens",
+)
+
+
+def _usage_block(value) -> dict | None:
+    """`value` if it looks like a Codex usage block (has a token field), else None."""
+    if isinstance(value, dict) and any(key in value for key in _USAGE_KEYS):
+        return value
+    return None
+
+
+def _cumulative(records: list[dict]) -> dict | None:
+    """The last cumulative `total_token_usage` block among a day's `token_count` events, or None.
+
+    Read the *cumulative* total, not the per-turn `last_token_usage`, on purpose. Codex emits
+    `token_count` events in exact duplicate pairs (verified against a real corpus, issue #44), so
+    summing the per-turn block double-counts — whereas the cumulative is monotonic and a duplicate
+    just repeats the same value, leaving a day's delta (`_delta_usage`) untouched. The block lives
+    at `payload.info.total_token_usage`; the older top-level `payload.total_token_usage` layout is
+    also read. "Last in the day" is by file order, which `_by_day` preserves, so it is the
+    cumulative as of that day's final turn.
+    """
+    found: dict | None = None
+    for record in records:
+        if record.get("type") != "event_msg":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
+            continue
+        info = payload.get("info")
+        block = _usage_block(info.get("total_token_usage")) if isinstance(info, dict) else None
+        if block is None:
+            block = _usage_block(payload.get("total_token_usage"))
+        if block is not None:
+            found = block
+    return found
+
+
+def _model(records: list[dict], meta: dict) -> str:
+    """The model the day ran on — the last `turn_context.model` seen, else the header's `model`.
+
+    `turn_context` is re-emitted every turn and whenever the model changes, so the last one on the
+    day is the model in force at the day's end — the same "final state wins" rule `cards._last` uses
+    for the drifting metadata, and `turn_context.model` is the only place a model string appears
+    (verified against a real corpus, issue #44). Falls back to `session_meta`'s `model` for a day
+    with no `turn_context`, and to "" when neither carries one.
+    """
+    model = ""
+    for record in records:
+        if record.get("type") == "turn_context":
+            payload = record.get("payload")
+            if isinstance(payload, dict) and payload.get("model"):
+                model = str(payload["model"])
+    return model or str(meta.get("model") or "")
+
+
+def _delta_usage(prev: dict | None, end: dict, model: str) -> Usage:
+    """One day's spend as the rise in the cumulative total from the prior day's end to this day's.
+
+    Each category of `total_token_usage` is monotonic non-decreasing (verified, issue #44), so a
+    day's own tokens are `end - prev` per category, and summing those deltas over a thread
+    telescopes back to the final cumulative — the authoritative total. `prev` is None for the first
+    day with telemetry (its baseline is zero). Then OpenAI's shape is normalised to `Usage`'s
+    disjoint one: `input_tokens` *includes* the cached and cache-write portions, so `input` is
+    `input_tokens - cached_input_tokens - cache_write_input_tokens` (clamped at 0); `cache_read` is
+    the cached part and `cache_write` the cache-creation part — matching Anthropic, where the
+    categories are already separate. `output_tokens` already *includes* `reasoning_output_tokens`
+    (verified against a real corpus, issue #44: `total_tokens == input_tokens + output_tokens`
+    across the whole corpus), so reasoning is not added — doing so would double-count it.
+    """
+
+    def delta(key: str) -> int:
+        base = cards._int(prev.get(key)) if prev else 0
+        return max(cards._int(end.get(key)) - base, 0)
+
+    cache_read = delta("cached_input_tokens")
+    cache_write = delta("cache_write_input_tokens")
+    input_ = max(delta("input_tokens") - cache_read - cache_write, 0)
+    output = delta("output_tokens")
+    return Usage(input_, output, cache_read, cache_write, model)
+
+
+def _day_usages(slices: list[_DaySlice]) -> list[Usage | None]:
+    """Each day's `Usage` (or None if it logged no telemetry), one per slice, in slice order.
+
+    Walks the days oldest-first carrying the running cumulative baseline, so each day's `Usage` is
+    the rise across *that* day alone (`_delta_usage`). The baseline advances past every day that has
+    telemetry — including one that earns no card — so an un-carded day's tokens are charged to
+    itself and discarded with it, never folded into the next carded day. A day with no telemetry
+    yields None and leaves the baseline where it was.
+    """
+    usages: list[Usage | None] = []
+    prev: dict | None = None
+    for slice_ in slices:
+        end = _cumulative(slice_.records)
+        if end is None:
+            usages.append(None)
+            continue
+        usages.append(_delta_usage(prev, end, _model(slice_.records, slice_.meta)))
+        prev = end
+    return usages
+
+
+def _day_card(
+    slice_: _DaySlice,
+    turns: list[Turn],
+    *,
+    session_id: str,
+    crate_version: str,
+    usage: Usage | None,
+) -> Card:
+    """One day of a thread as a Card. Every field is a function of that day's records alone — save
+    `usage`, whose cumulative-delta baseline is the prior day's end (`_day_usages`)."""
     git = slice_.meta.get("git")
     git_branch = str(git.get("branch") or "") if isinstance(git, dict) else ""
     timestamps = [r["timestamp"] for r in slice_.records if r.get("timestamp")]
@@ -303,6 +425,7 @@ def _day_card(slice_: _DaySlice, turns: list[Turn], *, session_id: str, crate_ve
         # rewrite Monday's card on every sweep.
         cursor=str(len(slice_.records)),
         records=len(slice_.records),
+        usage=usage,
     )
 
 
@@ -331,15 +454,26 @@ def parse(session: Path, *, crate_version: str) -> list[Card]:
         return []
 
     session_id = _rollout_id(header)
+    slices = _by_day(records)
+    # Usage is computed across all slices at once — its cumulative-delta baseline chains day to day
+    # (`_day_usages`) — where every other card field is a function of the day's own records.
+    usages = _day_usages(slices)
+
     parsed: list[Card] = []
-    for slice_ in _by_day(records):
+    for slice_, usage in zip(slices, usages, strict=True):
         # Split first, then parse: turns are built per day, so `_append_assistant` can never fold
         # a Wednesday record onto a Tuesday turn and Tuesday's card never depends on what came
         # after it.
         turns = _turns(slice_.records)
         if turns:
             parsed.append(
-                _day_card(slice_, turns, session_id=session_id, crate_version=crate_version)
+                _day_card(
+                    slice_,
+                    turns,
+                    session_id=session_id,
+                    crate_version=crate_version,
+                    usage=usage,
+                )
             )
     return parsed
 
