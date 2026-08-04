@@ -12,6 +12,7 @@ from typing import Annotated
 import typer
 
 from crate_wiki import __version__, codex, hook, vault, wiki
+from crate_wiki import lint as lint_wiki  # the command below is `lint`, so the module needs a name
 
 # Every command below takes the vault it works on. Defaulting to the cwd is the common case by
 # far — you run these from inside the vault, or from a slash command whose cwd is the vault.
@@ -332,6 +333,32 @@ def pending(
     unswept = codex.count_unswept(resolved_vault, sessions_dir=sessions_dir)
     if unswept:
         typer.echo(f"{unswept} Codex rollouts not yet swept — run /fetch-codex")
+
+
+@app.command()
+def lint(vault_path: VaultOption = Path(".")) -> None:
+    """Check the wiki for the things that have a single right answer. Prints nothing when clean.
+
+    One finding per line, `path<TAB>check<TAB>detail`, sorted — the same shape as `crate pending`,
+    so `/lint` can read it back and spend its tokens on the four questions code can't answer.
+    The checks are dead wikilinks, orphan pages, an index that no longer matches the pages on
+    disk, and a page citing a raw source that's private (ADR-0006) or missing.
+
+    **It reports and never repairs**, and it **exits 0 whether or not it found anything** — only a
+    bad vault exits 1. Findings are the normal state of a working vault: a concept you haven't
+    linked yet, an index one command behind. A gate that fires on the normal state is one you
+    turn off, which is the failure this check exists to avoid (ADR-0020).
+
+    Staleness isn't here. `crate pending` reports a raw file that has outrun its page, against the
+    digest the page recorded, and a second answer to that question would be one without the ledger.
+    """
+    try:
+        findings = lint_wiki.check(vault_path)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+
+    for finding in findings:
+        typer.echo(f"{finding.path}\t{finding.check}\t{finding.detail}")
 
 
 @app.command()

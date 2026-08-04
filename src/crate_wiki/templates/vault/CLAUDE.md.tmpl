@@ -117,7 +117,7 @@ Mechanics have commands, and they cost nothing to run:
 | `crate fmt` | put every page's paragraphs back on one line each |
 | `crate index` | regenerate `index.md` from every page's `summary:` |
 | `crate log <op> --title` | append one entry to `log.md` |
-| `crate lint` | dead wikilinks, orphans, missing index entries |
+| `crate lint` | dead wikilinks, orphans, a stale index, a page citing a private or missing source |
 
 Run these from the vault root; they all take `--vault .`.
 
@@ -132,5 +132,8 @@ Ask me to add a command before you hand-roll a mechanical job.
 - `/daily` — write the account of a day from that day's session cards. Reads `raw/` directly, so it
   works on a day nothing has been ingested from. **Tell me the day before writing it** — the cards
   hold what happened and only I hold why. One page, in `wiki/daily/`, and never any other.
-- `/lint` — contradictions, stale claims, concepts referenced with no page.
+- `/lint` — check the wiki. Runs `crate lint` first for everything code can decide, then asks the
+  four things it can't: contradictions between pages, claims a newer source superseded, concepts
+  referenced with no page, and gaps a search would close. **It writes nothing** — every fix belongs
+  to the operation that owns it.
 $scope_section

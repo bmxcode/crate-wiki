@@ -22,6 +22,7 @@ One record per decision where a real alternative was rejected. If there was no a
 | [0017](0017-staleness-is-a-content-comparison.md) | Staleness is a content comparison, recorded on the page | A finer timestamp looks like the smaller fix, and doesn't fix it |
 | [0018](0018-tokens-are-captured-cost-is-external.md) | A card records tokens; the dollar cost is computed outside the engine | Capturing an estimated cost in the engine vs. capturing only the durable, deterministic tokens |
 | [0019](0019-a-live-card-is-the-running-sessions-card-for-today.md) | A live card is the running session's card for today | Matching the session id alone would mark finished days of a long session too |
+| [0020](0020-the-linter-reports-and-never-repairs.md) | The linter earns a command, reports rather than repairs, and drops a check | A check the issue asked for is now `crate pending`'s answer; a linter that gates CI vs. one you keep running |
 
 0007 is deliberately unused: every work vault's `config.toml` reserves it for the record that would
 have to be written to reopen [ADR-0001](0001-local-only-work-vault.md) and give that vault a remote.

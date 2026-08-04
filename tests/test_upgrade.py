@@ -49,6 +49,7 @@ def age(target):
     baseline.pop(".claude/commands/ask.md", None)
     baseline.pop(".claude/commands/daily.md", None)
     baseline.pop(".claude/commands/fetch-codex.md", None)
+    baseline.pop(".claude/commands/lint.md", None)
     vault.write_baseline(target, baseline, "0.0.1")
 
 
@@ -74,6 +75,7 @@ def shipped(target, relative):
 def test_init_installs_the_slash_commands(made):
     assert (made / ".claude" / "commands" / "ingest.md").is_file()
     assert (made / ".claude" / "commands" / "ask.md").is_file()
+    assert (made / ".claude" / "commands" / "lint.md").is_file()
 
 
 def test_every_engine_file_lands_where_create_and_upgrade_agree_it_should(made):
@@ -121,6 +123,7 @@ def test_a_missing_command_is_added_and_a_stale_template_rewritten(made):
     report = vault.upgrade(made, version=__version__)
 
     assert ".claude/commands/ingest.md" in report.created
+    assert ".claude/commands/lint.md" in report.created
     assert ".crate/templates/concept.md" in report.updated
     assert STALE not in (made / ".crate" / "templates" / "concept.md").read_text(encoding="utf-8")
 
