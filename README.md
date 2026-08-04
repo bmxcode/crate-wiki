@@ -23,13 +23,13 @@ Three layers:
 | **The schema** | `CLAUDE.md` / `AGENTS.md` | The engine — it's what makes the LLM a knowledge manager rather than a chatbot |
 | **Your conventions** | `CONVENTIONS.md` | You — what this particular vault has decided |
 
-Three operations: **ingest** a source, **ask** the wiki a question, **lint** it for contradictions and gaps.
+Four operations: **ingest** a source, **ask** the wiki a question, write up a **day**, and **lint** it for contradictions and gaps.
 
 *On the name:* DJs call it crate-digging — going through records to find what's worth playing. The raw sources are the crate.
 
 ## Two ideas shape the design
 
-**Code does mechanics; the LLM does judgment.** Anything with a single right answer should be code. Checking that every wikilink resolves is a `for` loop, not a reasoning task — so `crate lint` does it in Python, and the LLM is only asked the thing it's uniquely good at: *do these two pages contradict each other?* This keeps the wiki reliable rather than vibes-based. See [ADR-0004](docs/adr/0004-deterministic-cli.md).
+**Code does mechanics; the LLM does judgment.** Anything with a single right answer should be code. Checking that every wikilink resolves is a `for` loop, not a reasoning task — so `crate lint` does it in Python, and the LLM is only asked the thing it's uniquely good at: *do these two pages contradict each other?* This keeps the wiki reliable rather than vibes-based. See [ADR-0004](docs/adr/0004-deterministic-cli.md) and [ADR-0020](docs/adr/0020-the-linter-reports-and-never-repairs.md), which splits the linter along that line and has it report without ever repairing.
 
 **Capture is free; synthesis is paid.** A Stop hook parses each session to disk in pure Python at zero token cost, so capture is never the thing you forget. Synthesis only runs when you ask for it, so it never surprises your token budget. See [ADR-0002](docs/adr/0002-free-capture-paid-synthesis.md).
 

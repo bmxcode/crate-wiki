@@ -147,6 +147,8 @@ ingested card, which a day's account still has to read. The rule an operation is
 either way ([ADR-0012](adr/0012-daily-reads-raw-and-earns-a-command.md)): a command for a mechanical
 step with no home, and nothing for a step the model should be doing.
 
+`/lint` is where that rule comes out most decisively: five mechanical steps, none of them with a home. `crate lint` reports dead wikilinks, orphan pages, an `index.md` that no longer matches the pages on disk, and a page citing a raw source that is **private** ([ADR-0006](adr/0006-private-sections-are-context-only.md) asks the linter for that one by name) or missing. It **reports and never repairs** — a tool that edits the pages it checks describes a state that is already gone — and it exits 0 whether or not it found anything, because findings are the normal state of a working vault and a gate that fires on the normal state is one you turn off. The `/lint` prompt then asks only the four questions code can't: contradictions, claims a newer source superseded, concepts referenced with no page, and gaps a search would close. It is the one operation that writes nothing at all. A check the issue asked for — `raw/` immutability — is deliberately **not** built: a card rewritten after a page read it is ordinary ([ADR-0016](adr/0016-a-rewind-re-renders-the-day-it-changed.md)) and `crate pending` already reports it against the digest ledger, so a second answer would be one without the ledger ([ADR-0020](adr/0020-the-linter-reports-and-never-repairs.md)).
+
 ## The session parser
 
 The most interesting component, because its job is **discarding, not converting**.

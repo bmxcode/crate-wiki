@@ -136,18 +136,34 @@ def load_pages(vault: Path) -> list[Page]:
     return pages
 
 
-def _public_sections(vault: Path) -> list[str]:
+def public_sections(vault: Path) -> list[str]:
     """Section names under `raw/` that may be synthesized into the wiki.
 
     Private sections are excluded outright (ADR-0006). The gitignore keeps them off a remote;
     this keeps them out of `wiki/`, which is the half a gitignore can't do.
     """
+    return [name for name, private in _sections(vault) if not private]
+
+
+def private_sections(vault: Path) -> set[str]:
+    """Section names under `raw/` that may never be a source for a page.
+
+    The other half of the same question, and the one the linter asks: `public_sections` gates what
+    `crate pending` offers, so a page that cited a private path is invisible there by construction
+    — filtered out before the walk even starts. Naming the private set is what lets `crate lint`
+    look for the leak instead (ADR-0006).
+    """
+    return {name for name, private in _sections(vault) if private}
+
+
+def _sections(vault: Path) -> list[tuple[str, bool]]:
+    """Every `[[raw.sections]]` entry as `(name, private)`, skipping malformed ones."""
     config = load_config(vault)
     sections = config.get("raw", {}).get("sections", [])
     return [
-        str(section["name"])
+        (str(section["name"]), bool(section.get("private")))
         for section in sections
-        if isinstance(section, dict) and section.get("name") and not section.get("private")
+        if isinstance(section, dict) and section.get("name")
     ]
 
 
@@ -165,7 +181,7 @@ def _raw_files(vault: Path, sections: list[str]) -> list[str]:
     return sorted(found)
 
 
-def _normalise(reference: str) -> str:
+def normalise_source(reference: str) -> str:
     """A `sources:` entry as a vault-relative posix path, for comparison against raw files.
 
     Entries that are wikilinks rather than paths (`[[Some Page]]`, which is what the non-source
@@ -187,7 +203,7 @@ def ingested(vault: Path) -> dict[str, Page]:
         if page.kind != "sources":
             continue
         for reference in page.sources:
-            claims.setdefault(_normalise(reference), page)
+            claims.setdefault(normalise_source(reference), page)
     return claims
 
 
@@ -211,7 +227,7 @@ def pending(vault: Path, *, include_all: bool = False) -> list[Pending]:
     live = _live_card()
     results: list[Pending] = []
 
-    for relative in _raw_files(vault, _public_sections(vault)):
+    for relative in _raw_files(vault, public_sections(vault)):
         page = claims.get(relative)
         if page is None:
             status = "new"
@@ -291,7 +307,7 @@ def recorded_digests(page: Page) -> dict[str, str]:
     for entry in page.source_hash:
         path, sep, digest = entry.strip().rpartition(" ")
         if sep and path.strip() and digest.strip():
-            digests[_normalise(path)] = digest.strip()
+            digests[normalise_source(path)] = digest.strip()
     return digests
 
 
@@ -314,7 +330,7 @@ def _is_stale(raw: Path, relative: str, page: Page) -> bool:
     if not page.updated:
         return False
 
-    recorded = recorded_digests(page).get(_normalise(relative))
+    recorded = recorded_digests(page).get(normalise_source(relative))
     if recorded:
         current = source_digest(raw)
         return bool(current) and current != recorded
@@ -379,7 +395,7 @@ def day_cards(vault: Path, day: str) -> list[str]:
     excludes private sections rather than erroring — ADR-0006 is a rule about what may reach
     `wiki/`, and a daily page is `wiki/`.
     """
-    if SESSION_SECTION not in _public_sections(vault):
+    if SESSION_SECTION not in public_sections(vault):
         return []
 
     dated: list[tuple[str, str]] = []
@@ -604,9 +620,9 @@ def _digest_entry(vault: Path, source: str) -> str:
 
     A `sources:` entry on a synthesis or a daily page is a `[[wikilink]]`, not a path, and there
     is no file behind it to hash — those pages get no `source_hash:` entry, which is the same
-    answer `_normalise` already gives the ledger.
+    answer `normalise_source` already gives the ledger.
     """
-    relative = _normalise(source)
+    relative = normalise_source(source)
     if not relative.startswith("raw/"):
         return ""
     return source_digest(vault / relative)
@@ -619,8 +635,8 @@ def _merge_digest(existing: tuple[str, ...], source: str, digest: str) -> tuple[
     move its recorded hash forward — otherwise the page would stay permanently stale against a
     source it has just absorbed.
     """
-    target = _normalise(source)
-    kept = [e for e in existing if _normalise(e.rpartition(" ")[0]) != target]
+    target = normalise_source(source)
+    kept = [e for e in existing if normalise_source(e.rpartition(" ")[0]) != target]
     return (*kept, f"{source} {digest}")
 
 
