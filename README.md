@@ -99,9 +99,20 @@ crate install-hook --vault ~/crate-personal
 That merges a Stop hook into `~/.claude/settings.json`. It's idempotent and non-destructive — re-running updates its own entry and leaves any other Stop hooks alone; point it at a new vault to move the target. Prefer to wire it by hand? Add this instead (use the absolute path from `which crate` if your hook environment doesn't have it on `PATH`):
 
 ```json
-{ "hooks": { "Stop": [ { "hooks": [
-  { "type": "command", "command": "crate capture claude --vault \"$HOME/crate-personal\"" }
-] } ] } }
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "crate capture claude --vault \"$HOME/crate-personal\""
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
 What to expect:
