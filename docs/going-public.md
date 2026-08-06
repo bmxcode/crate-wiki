@@ -12,6 +12,7 @@ This repo is built to be public — the engine holds no vault content, and `raw/
   ```
 
 - **README and repo description** describe the current state, not a half-built one.
+- **[CONTRIBUTING.md](../CONTRIBUTING.md) and [SECURITY.md](../SECURITY.md) exist and are true.** Both say what is actually the case — no PRs for now, issues welcome, and a private route for a security report. A file that describes a process nobody is running is worse than no file.
 
 ## At the flip
 
@@ -50,6 +51,24 @@ JSON
 gh api --method PATCH "repos/$REPO" \
   -f 'security_and_analysis[secret_scanning][status]=enabled' \
   -f 'security_and_analysis[secret_scanning_push_protection][status]=enabled'
+
+# Private vulnerability reporting — the route SECURITY.md sends people to. Without this, the
+# advisory form 404s and the only way to reach me is a public issue, which is the wrong shape
+# for a security report.
+gh api --method PUT "repos/$REPO/private-vulnerability-reporting"
+
+# Topics. The description is already set; these are what someone actually searches for.
+gh repo edit "$REPO" \
+  --add-topic llm \
+  --add-topic knowledge-management \
+  --add-topic personal-knowledge-management \
+  --add-topic second-brain \
+  --add-topic claude-code \
+  --add-topic codex \
+  --add-topic obsidian \
+  --add-topic agent-memory \
+  --add-topic python \
+  --add-topic cli
 ```
 
 ## Branching, once public
