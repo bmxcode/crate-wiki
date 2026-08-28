@@ -57,8 +57,10 @@ gh api --method PATCH "repos/$REPO" \
 # for a security report.
 gh api --method PUT "repos/$REPO/private-vulnerability-reporting"
 
-# Topics. The description is already set; these are what someone actually searches for.
+# Description and topics — what a search result and the About sidebar show. The description
+# is set but thin; this one says what it does, not just what it is.
 gh repo edit "$REPO" \
+  --description "An LLM wiki that compounds what you learn and what you've done. Captures every Claude Code and Codex session to Markdown for free, then folds them into a cross-referenced Obsidian vault when you ask. Pure Python." \
   --add-topic llm \
   --add-topic knowledge-management \
   --add-topic personal-knowledge-management \
@@ -68,7 +70,18 @@ gh repo edit "$REPO" \
   --add-topic obsidian \
   --add-topic agent-memory \
   --add-topic python \
-  --add-topic cli
+  --add-topic cli \
+  --add-topic markdown \
+  --add-topic note-taking \
+  --add-topic developer-tools
+```
+
+Then cut the first release, so `uv tool install` is reproducible rather than pinned to whatever `main` happens to be:
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0 — first public release"
+git push origin v0.1.0
+gh release create v0.1.0 --title "v0.1.0 — first public release" --notes-from-tag
 ```
 
 ## Branching, once public

@@ -2,7 +2,9 @@
 
 An LLM wiki that compounds what you learn and what you've done.
 
-[![CI](https://github.com/bmxcode/crate-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/bmxcode/crate-wiki/actions/workflows/ci.yml) ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+[![CI](https://github.com/bmxcode/crate-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/bmxcode/crate-wiki/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 
 Since I started building with AI assistants, my working memory of my own work collapsed from about six weeks to about three days. crate-wiki fixes the part of that a tool can fix. Every Claude Code session is parsed to disk as it runs — pure Python, zero tokens, no assistant involved (Codex too, on a one-command sweep). Then, only when you ask, an LLM folds one into a cross-referenced wiki you can still read in three months.
 
@@ -12,7 +14,7 @@ crate init ~/crate-personal --scope personal    # an Obsidian vault, schema incl
 crate install-hook --vault ~/crate-personal     # sessions now capture themselves
 ```
 
-> **Status: early.** Milestones 1 and 2 are done — capture, `/ingest`, `/ask`, `/daily`, `/lint` all work and have tests. [Milestone 3](https://github.com/bmxcode/crate-wiki/milestone/3) is open. There's no tagged release, the vault format can still change under `crate upgrade`, and as far as I know I'm the only person running it. Every contested decision has a record in [docs/adr/](docs/adr/), including the ones later reversed.
+> **Status: early.** Milestones 1 and 2 are done — capture, `/ingest`, `/ask`, `/daily`, `/lint` all work and have tests. [Milestone 3](https://github.com/bmxcode/crate-wiki/milestone/3) is open. I run it daily on my personal and work machines. The vault format can still change under `crate upgrade`, and what doesn't work yet is listed below. Every contested decision has a record in [docs/adr/](docs/adr/), including the ones later reversed.
 
 Everything stays on your machine: capture reads local transcript files and writes local Markdown, and nothing is uploaded anywhere. The only thing that costs tokens is a synthesis you ran yourself.
 
@@ -78,7 +80,15 @@ Four operations: **ingest** a source, **ask** the wiki a question, write up a **
 
 `/ingest` is the one that builds the wiki. `/ask` is why you built it — answers worth keeping are promoted to `wiki/syntheses/`, so exploring compounds instead of evaporating into chat. `/daily` answers the question this started from: it reads a day's session cards straight out of `raw/` and writes an account of the day you can read in three months and have the day back. `/lint` is the one operation that writes nothing at all.
 
-## Set up a vault
+## Install, and set up a vault
+
+Python 3.11 or newer. The quickstart above uses [uv](https://docs.astral.sh/uv/); pip works too:
+
+```bash
+pip install git+https://github.com/bmxcode/crate-wiki
+```
+
+Then scaffold a vault:
 
 ```bash
 crate init ~/crate-personal --scope personal
@@ -194,6 +204,34 @@ It refreshes what the engine owns: `CLAUDE.md`, `AGENTS.md`, `.claude/commands/`
 
 Overwriting the schema is safe because the vault records a hash of what the engine last wrote it, in `.crate/baseline.json`. That's what separates "the template moved" from "you edited this" — a file you've changed is reported and left alone rather than clobbered, and so is one the engine has no record of writing. `crate upgrade --adopt` takes the shipped versions anyway, which is the one-time step for a vault created before that record existed. See [ADR-0010](docs/adr/0010-conventions-file-and-upgrade-baseline.md).
 
+## What doesn't work yet
+
+- **Only sessions are ingested.** `raw/` scaffolds `clips/`, `youtube/` and `pastes/`, and nothing fills them — the Obsidian Clipper target, YouTube transcripts and pasted messages need normalising into raw sources first ([#10](https://github.com/bmxcode/crate-wiki/issues/10)).
+- **There's no MCP search server.** [docs/architecture.md](docs/architecture.md) names one as part of the engine; it isn't built ([#11](https://github.com/bmxcode/crate-wiki/issues/11)). Today the wiki is searched by the assistant reading `index.md` and opening the pages it can name a reason for.
+- **Codex captures only when you ask it to.** Its `notify` slot fires per turn rather than on session exit, and is usually already taken, so there's nothing to hang an automatic hook on. `crate capture codex` or `/fetch-codex` before an `/ingest` is the substitute — and forgetting is the failure mode.
+- **A forked Claude Code session double-counts.** Rarely, Claude Code starts a new transcript beginning with a verbatim copy of a prior conversation's records under a new session id, so the same work lands on two cards ([#41](https://github.com/bmxcode/crate-wiki/issues/41), open). A per-day split doesn't close it.
+- **Capture never tells you it failed.** That's the contract — it must not block session exit ([ADR-0002](docs/adr/0002-free-capture-paid-synthesis.md)) — but it means a missing card is silent until you look at the log.
+- **It has only ever run at one person's scale.** Nothing here has met a large vault, a shared vault, or a corpus built by someone whose conventions differ from mine.
+
+## If something doesn't work
+
+**A session card didn't appear.** Capture fails quietly by design, so the reason is in the log and nowhere else:
+
+```bash
+tail ~/.claude/crate-capture.log
+```
+
+**The wiki looks wrong.** Run the mechanical checks before reasoning about it — they're free and they're exhaustive for the questions they answer:
+
+```bash
+crate lint --vault .        # dead links, orphans, a drifted index, private or missing sources
+crate pending --vault .     # raw sources not folded in, and pages their source has outrun
+```
+
+**Something disagrees with the docs.** That's a real bug and worth an issue on its own. The README and `--help` make promises the same way a wiki page does, and promises rot.
+
+When you file one, **don't paste session transcripts, wiki pages, or anything from a work context** — this repo is public and its history is permanent. Describe the shape of the problem, or build a synthetic file that reproduces it.
+
 ## Design
 
 - [Architecture](docs/architecture.md) — the layers, the tiers, and the data flow
@@ -204,6 +242,10 @@ The ADRs are the honest part of this repo. Each one names the alternative that l
 ## Contributing
 
 I'm not taking pull requests yet, but issues are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Security reports go through [SECURITY.md](SECURITY.md).
+
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md) records what changed between releases and why.
 
 ## License
 
