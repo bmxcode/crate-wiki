@@ -1,0 +1,51 @@
+name: Something's broken
+description: A command fails, does nothing, or does something other than what the docs promise
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Don't paste session transcripts, wiki pages, or anything from a work context** — this repo is public and its history is permanent. Describe the shape of the problem, or build a synthetic file that reproduces it.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `crate --version`, plus your OS and Python version.
+      placeholder: crate 0.1.0 · macOS 15.5 · Python 3.13
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and full output
+      description: The exact command you ran and everything it printed. Paste text, not a screenshot.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: If the README, `--help` or a slash command promised something different, quote the line. A promise that no longer matches the code is a real bug and worth its own report.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - Capture (the Stop hook, crate capture)
+        - A vault command (init, upgrade, index, lint, …)
+        - A slash command (/ingest, /ask, /daily, /lint)
+        - The docs are wrong
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Capture log
+      description: If a session card didn't appear, the last few lines of `~/.claude/crate-capture.log`. Capture fails quietly by design, so this is usually the only place the reason shows up. Redact any paths you'd rather not publish.
+      render: shell
+    validations:
+      required: false
