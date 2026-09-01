@@ -5,13 +5,14 @@ tokens on judgment. See docs/adr/0004-deterministic-cli.md.
 """
 
 import sys
+from datetime import date
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from crate_wiki import __version__, codex, hook, vault, wiki
+from crate_wiki import __version__, codex, hook, intake, vault, wiki
 from crate_wiki import lint as lint_wiki  # the command below is `lint`, so the module needs a name
 
 # Every command below takes the vault it works on. Defaulting to the cwd is the common case by
@@ -218,6 +219,95 @@ def install_hook(
 def _fail(error: vault.VaultError) -> typer.Exit:
     typer.secho(f"crate: {error}", fg=typer.colors.RED, err=True)
     return typer.Exit(1)
+
+
+add_app = typer.Typer(
+    help="Add non-session material as a raw source: normalize a paste or a web clip. "
+    "Offline and deterministic — it normalizes what you have, it never fetches (ADR-0022).",
+    no_args_is_help=True,
+)
+app.add_typer(add_app, name="add")
+
+
+def _read_content(file: Path | None) -> str:
+    """The text to normalize: `--file` if given, else stdin. Unlike capture, this is strict —
+    `crate add` is invoked by a person, so an empty input is an error worth reporting, not a
+    quiet no-op the way a hook's must be."""
+    if file is not None:
+        try:
+            return file.read_text(encoding="utf-8")
+        except OSError as error:
+            raise _fail(vault.VaultError(f"can't read {file}: {error}")) from error
+    if sys.stdin.isatty():
+        raise _fail(vault.VaultError("no input — pass text on stdin or with --file"))
+    return sys.stdin.read()
+
+
+def _write_and_report(vault_path: Path, section: str, captured: str, title: str, content: str):
+    try:
+        filename = intake.source_filename(captured, title)
+        path = intake.write_source(vault_path, section, filename, content)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+    typer.echo(path)
+
+
+@add_app.command("paste")
+def add_paste(
+    title: Annotated[str, typer.Option("--title", help="The source title — its H1 and filename.")],
+    origin: Annotated[
+        str, typer.Option("--from", help="Where it came from: slack, email, teams, …")
+    ] = "",
+    url: Annotated[
+        str, typer.Option("--url", help="A link to the original, if there is one.")
+    ] = "",
+    file: Annotated[
+        Path | None, typer.Option("--file", help="Read the text from here instead of stdin.")
+    ] = None,
+    when: Annotated[
+        str | None, typer.Option("--date", help="Capture date (YYYY-MM-DD). Defaults to today.")
+    ] = None,
+    vault_path: VaultOption = Path("."),
+) -> None:
+    """Normalize a pasted message into `raw/pastes/` as a source, its text kept verbatim."""
+    captured = when or date.today().isoformat()
+    try:
+        content = intake.normalize_paste(
+            _read_content(file), title=title, origin=origin, url=url, captured=captured
+        )
+    except vault.VaultError as error:
+        raise _fail(error) from error
+    _write_and_report(vault_path, "pastes", captured, title, content)
+
+
+@add_app.command("url")
+def add_url(
+    url: Annotated[
+        str, typer.Option("--url", help="The page URL. Read from a Clipper file if set there.")
+    ] = "",
+    title: Annotated[
+        str, typer.Option("--title", help="Overrides the title read from a Clipper capture.")
+    ] = "",
+    file: Annotated[
+        Path | None,
+        typer.Option("--file", help="An Obsidian Clipper .md (or article text) — else stdin."),
+    ] = None,
+    when: Annotated[
+        str | None, typer.Option("--date", help="Capture date (YYYY-MM-DD). Defaults to today.")
+    ] = None,
+    vault_path: VaultOption = Path("."),
+) -> None:
+    """Normalize a web clip into `raw/clips/`. A Clipper capture seeds title/url/author."""
+    captured = when or date.today().isoformat()
+    try:
+        content = intake.normalize_clip(
+            _read_content(file), url=url, title=title, captured=captured
+        )
+        # The title may have come from the Clipper frontmatter, so read it back for the filename.
+        resolved_title = wiki.read_frontmatter(content).get("title", title)
+    except vault.VaultError as error:
+        raise _fail(error) from error
+    _write_and_report(vault_path, "clips", captured, resolved_title, content)
 
 
 @app.command()
