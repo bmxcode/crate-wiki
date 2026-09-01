@@ -4,7 +4,7 @@ Notable changes to `crate-wiki`. The design and its rejected alternatives live i
 
 ## Unreleased
 
-Nothing yet.
+- **A forked Claude Code session is now a documented behaviour, not an open bug.** `claude --fork-session` copies the prior conversation verbatim under a new session id, so its shared prefix cards twice; this is by design and left alone, because Claude Code models a fork as two sessions and detecting the copy would need a cross-file glob the project has rejected before ([ADR-0021](docs/adr/0021-a-forked-session-is-two-cards.md), closing [#41](https://github.com/bmxcode/crate-wiki/issues/41)). Plain resume and continue append in place and are unaffected.
 
 ## 0.1.0 — 2026-08-28
 
