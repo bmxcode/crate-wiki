@@ -8,6 +8,8 @@ build/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+.idea/
+.vscode/
 
 # Vault content never belongs in the engine repo. Vaults live in their own
 # repositories; D11 is the single, curated exception and lands under docs/wiki/.

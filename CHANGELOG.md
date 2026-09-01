@@ -4,6 +4,7 @@ Notable changes to `crate-wiki`. The design and its rejected alternatives live i
 
 ## Unreleased
 
+- **`crate add` folds non-session material into a vault.** `crate add paste` normalizes a pasted message (Slack, email, Teams) and `crate add url` normalizes an Obsidian Clipper capture, each into a consistent frontmatter'd source under `raw/pastes/` or `raw/clips/` — where `crate pending` picks it up like any captured session. It **normalizes what you already have and never fetches**, keeping the engine offline and dependency-light ([ADR-0022](docs/adr/0022-ingesters-normalize-not-fetch.md)). A `youtube` transcript normalizer is planned next, on the same no-fetch rule.
 - **A forked Claude Code session is now a documented behaviour, not an open bug.** `claude --fork-session` copies the prior conversation verbatim under a new session id, so its shared prefix cards twice; this is by design and left alone, because Claude Code models a fork as two sessions and detecting the copy would need a cross-file glob the project has rejected before ([ADR-0021](docs/adr/0021-a-forked-session-is-two-cards.md), closing [#41](https://github.com/bmxcode/crate-wiki/issues/41)). Plain resume and continue append in place and are unaffected.
 
 ## 0.1.0 — 2026-08-28

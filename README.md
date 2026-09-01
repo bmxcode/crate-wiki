@@ -180,6 +180,8 @@ Two consequences worth knowing:
 | `crate upgrade <path>` | Refresh the engine-owned files in an existing vault |
 | `crate capture claude` | Capture the current Claude Code session — what the Stop hook calls |
 | `crate capture codex` | Sweep `~/.codex/sessions/` for new or changed rollouts |
+| `crate add paste --title <t>` | Normalize a pasted message (stdin or `--file`) into a `raw/pastes/` source |
+| `crate add url` | Normalize an Obsidian Clipper capture (`--file`, or stdin) into a `raw/clips/` source |
 | `crate pending` | Raw sources the wiki hasn't folded in yet, and ones that have gone stale |
 | `crate day [yesterday]` | One day's session cards, oldest first — what `/daily` reads |
 | `crate new <type> <title>` | Scaffold a wiki page from the vault's template |
@@ -206,7 +208,7 @@ Overwriting the schema is safe because the vault records a hash of what the engi
 
 ## What doesn't work yet
 
-- **Only sessions are ingested.** `raw/` scaffolds `clips/`, `youtube/` and `pastes/`, and nothing fills them — the Obsidian Clipper target, YouTube transcripts and pasted messages need normalising into raw sources first ([#10](https://github.com/bmxcode/crate-wiki/issues/10)).
+- **YouTube transcripts aren't ingested yet.** `crate add paste` and `crate add url` now fill `raw/pastes/` and `raw/clips/`, but `raw/youtube/` still waits on a `crate add youtube` — a normalizer for a transcript copied from YouTube's "Show transcript" panel, on the same no-fetch rule as the others ([#10](https://github.com/bmxcode/crate-wiki/issues/10), [ADR-0022](docs/adr/0022-ingesters-normalize-not-fetch.md)).
 - **There's no MCP search server.** [docs/architecture.md](docs/architecture.md) names one as part of the engine; it isn't built ([#11](https://github.com/bmxcode/crate-wiki/issues/11)). Today the wiki is searched by the assistant reading `index.md` and opening the pages it can name a reason for.
 - **Codex captures only when you ask it to.** Its `notify` slot fires per turn rather than on session exit, and is usually already taken, so there's nothing to hang an automatic hook on. `crate capture codex` or `/fetch-codex` before an `/ingest` is the substitute — and forgetting is the failure mode.
 - **A forked Claude Code session becomes two cards.** `claude --fork-session` copies the prior conversation verbatim into a new transcript under a new session id, so the shared prefix cards twice (and a chain of forks, once per link). This is by design: Claude Code models a fork as two sessions, nothing in the file links them, and detecting the copy would need the cross-file glob #32 rejected — so crate reflects the two sessions as two cards rather than second-guessing a deliberate fork ([ADR-0021](docs/adr/0021-a-forked-session-is-two-cards.md), closing [#41](https://github.com/bmxcode/crate-wiki/issues/41)). Plain resume and continue append in place and are unaffected.
